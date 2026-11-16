@@ -265,6 +265,13 @@ auto ApplyFocusEvent(FocusQuery* query, FocusScan* scan, const FocusEventView& e
 
     switch (target) {
         case FocusTarget::Home:
+            /* HOME lost focus, but the applet that took it has already closed
+               (seen newer in this scan): pdm logs the applet's exit a moment
+               before HOME's InFocus, so keep scanning for HOME's previous state
+               instead of pausing for ~100 ms. */
+            if (kind != FocusEventKind::InFocus && scan->closed_count > 0) {
+                return false;
+            }
             /* qlaunch only owns the foreground while it has focus. */
             query->home = kind == FocusEventKind::InFocus;
             query->decided = true;
