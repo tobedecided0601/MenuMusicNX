@@ -42,7 +42,7 @@ bool g_pminfo_initialized{};
 u64 g_cached_app_tid{};
 pm::FocusOwner g_focus_owner{pm::FocusOwner::Unknown};
 pm::FocusOwner g_cached_focus_owner{pm::FocusOwner::Unknown};
-/* Music keeps playing in applets opened from the HOME Menu (see AppletKeepsMusic). */
+/* Music keeps playing in applets opened from the HOME Menu (see AppletMayKeepMusic and the opener scan). */
 bool g_home_applet_music{true};
 bool g_focus_log{false};
 /* True from the start of a sleep/shutdown transition until wake: no SD card
@@ -64,6 +64,7 @@ enum class FocusTarget : u8 {
 
 enum class FocusEventKind : u8 {
     Ignore,
+    Launch,
     InFocus,
     OutOfFocus,
     Terminated,
@@ -82,7 +83,9 @@ auto ClassifyFocusEventKind(u8 event_type) -> FocusEventKind {
         case PdmAppletEventType_Exit5:
         case PdmAppletEventType_Exit6:
             return FocusEventKind::Terminated;
-        default: /* PdmAppletEventType_Launch */
+        case PdmAppletEventType_Launch:
+            return FocusEventKind::Launch;
+        default:
             return FocusEventKind::Ignore;
     }
 }
@@ -177,6 +180,9 @@ struct ClosedApplet {
 struct FocusScan {
     ClosedApplet closed[CLOSED_PROGRAM_MAX]{};
     u32 closed_count{};
+    /* The newest focused applet may keep the music; scanning older events
+       to find out who opened it (HOME -> play, a game -> silent). */
+    bool resolving_opener{};
 };
 
 auto IsClosedApplet(const FocusScan& scan, const FocusEventView& event) -> bool {
@@ -230,20 +236,17 @@ auto IsSilentAppletProgram(u64 program_id) -> bool {
     }
 }
 
-/* Whether the music keeps playing while this applet has focus: only for
-   applets opened by the HOME Menu itself (Settings dialogs, keyboard, user
-   page, controllers, profile selector, ...), never for ones a game opened. */
-auto AppletKeepsMusic(const FocusEventView& event) -> bool {
+/* Whether this applet may keep the music playing at all. Whether it really
+   does depends on who opened it (see the opener scan in ApplyFocusEvent):
+   the play log's program id is the root of the applet chain (always qlaunch,
+   even for a keyboard a game opened), so it can't tell. */
+auto AppletMayKeepMusic(const FocusEventView& event) -> bool {
     if (!g_home_applet_music) {
         return false;
     }
 
     if (event.applet_id != AppletId_None) {
-        if (IsSilentAppletId(event.applet_id)) {
-            return false;
-        }
-        /* program_id is the program that opened the applet. */
-        return event.program_id == QLAUNCH_TITLE_ID;
+        return !IsSilentAppletId(event.applet_id);
     }
 
     /* Applet event log: only the program id is known. */
@@ -260,6 +263,55 @@ auto ApplyFocusEvent(FocusQuery* query, FocusScan* scan, const FocusEventView& e
 
     const auto target = ClassifyFocusTarget(event.program_id, event.applet_id, app_tid);
     if (target == FocusTarget::Ignore) {
+        return false;
+    }
+
+    /* Looking for whoever had the foreground before the focused applet. */
+    if (scan->resolving_opener) {
+        switch (target) {
+            case FocusTarget::Home:
+                /* HOME had focus before the applet: HOME opened it. HOME's own
+                   OutOfFocus is just the hand-over to the applet. */
+                if (kind == FocusEventKind::InFocus) {
+                    query->home = true;
+                    query->decided = true;
+                    return true;
+                }
+                return false;
+
+            case FocusTarget::Application:
+                /* A game that was launched, in front, or just lost focus to the
+                   applet opened it (keyboard, controllers, profile selector at
+                   game start, ...). A game that exited earlier didn't. */
+                if (kind == FocusEventKind::Terminated) {
+                    return false;
+                }
+                query->home = false;
+                query->decided = true;
+                return true;
+
+            case FocusTarget::Applet:
+                if (kind == FocusEventKind::Terminated) {
+                    MarkAppletClosed(scan, event);
+                    return false;
+                }
+                /* An older applet was in front: ours was opened from it. A
+                   silent one stays silent; otherwise its own opener decides. */
+                if (kind == FocusEventKind::InFocus && event.mode != 1 && !AppletMayKeepMusic(event)) {
+                    query->home = false;
+                    query->decided = true;
+                    return true;
+                }
+                return false;
+
+            case FocusTarget::Ignore:
+                break;
+        }
+        return false;
+    }
+
+    /* A launch alone doesn't change the foreground. */
+    if (kind == FocusEventKind::Launch) {
         return false;
     }
 
@@ -296,9 +348,14 @@ auto ApplyFocusEvent(FocusQuery* query, FocusScan* scan, const FocusEventView& e
                 if (event.mode == 1) {
                     return false;
                 }
-                query->home = AppletKeepsMusic(event);
-                query->decided = true;
-                return true;
+                if (!AppletMayKeepMusic(event)) {
+                    query->home = false;
+                    query->decided = true;
+                    return true;
+                }
+                /* Plays only if HOME opened it: find out from older events. */
+                scan->resolving_opener = true;
+                return false;
             }
             /* An applet that terminated is gone: keep scanning for the applet
                underneath it (or for the HOME Menu). */
@@ -321,6 +378,13 @@ auto ResolveFocusQuery(u64 app_tid, s32 count, FocusQuery* query) -> bool {
         if (ApplyFocusEvent(query, &scan, g_focus_view[i], app_tid)) {
             return true;
         }
+    }
+
+    /* Opener older than the scanned events: assume HOME unless a game runs. */
+    if (scan.resolving_opener) {
+        query->home = app_tid == 0 || app_tid == QLAUNCH_TITLE_ID;
+        query->decided = true;
+        return true;
     }
 
     return false;
