@@ -74,7 +74,7 @@ Keys read from that file:
 | `shuffle` / `repeat` | `0` / `1` | Shuffle and repeat mode, mirrored by the status bar buttons |
 | `load_path` | *(empty)* | Startup file or folder, set with **ZR** in the browser or playlist |
 
-The sysmodule re-reads these values whenever the focus event log changes, so a toggle flipped in the overlay applies the next time a game or applet takes the foreground.
+The sysmodule re-reads these values whenever a new focus event is logged, so a toggle flipped in the overlay applies the next time a game or applet takes the foreground.
 
 ## Usage
 

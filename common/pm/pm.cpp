@@ -28,7 +28,9 @@ constexpr const char FOCUS_LOG_PATH[] = "/config/sys-tune/focus.log";
 
 alignas(0x10) PdmAppletEvent g_applet_events[EVENT_COUNT]{};
 alignas(0x10) PdmPlayEvent g_play_events[EVENT_COUNT]{};
-s32 g_last_play_event_total{-1};
+/* Index of the newest play event seen. The log is a ring buffer: once it is
+   full its total entry count stops changing, but the end index keeps moving. */
+s32 g_last_play_event_end{-1};
 bool g_cached_home_foreground{};
 bool g_cached_home_valid{};
 bool g_pdmqry_initialized{};
@@ -375,13 +377,13 @@ auto QueryHomeForegroundFromPdm(u64 app_tid, bool* home_foreground) -> Result {
         return rc;
     }
 
-    if (total_entries == g_last_play_event_total && g_cached_home_valid && app_tid == g_cached_app_tid) {
+    if (end_entry_index == g_last_play_event_end && g_cached_home_valid && app_tid == g_cached_app_tid) {
         *home_foreground = g_cached_home_foreground;
         g_focus_owner = g_cached_focus_owner;
         return 0;
     }
 
-    g_last_play_event_total = total_entries;
+    g_last_play_event_end = end_entry_index;
 
     /* The ini is re-read whenever the focus event log changed, so a setting
        toggled in the overlay applies the moment it matters. */
@@ -656,7 +658,7 @@ auto Initialize() -> Result {
     g_pminfo_initialized = R_SUCCEEDED(pminfoInitialize());
     g_pdmqry_initialized = R_SUCCEEDED(pdmqryInitialize());
 
-    g_last_play_event_total = -1;
+    g_last_play_event_end = -1;
     g_cached_home_valid = false;
     g_cached_app_tid = 0;
     g_cached_focus_owner = pm::FocusOwner::Unknown;
