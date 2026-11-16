@@ -96,13 +96,17 @@ void set_default_title_volume(float value) {
     ini_putf("config", "global_volume", value, CONFIG_PATH);
 }
 
-auto get_pause_on_applet() -> bool {
-    return ini_getbool("config", "pause_on_applet", true, CONFIG_PATH);
+auto get_home_applet_music() -> bool {
+    return ini_getbool("config", "home_applet_music", true, CONFIG_PATH);
 }
 
-void set_pause_on_applet(bool value) {
+void set_home_applet_music(bool value) {
     create_config_dir();
-    ini_putl("config", "pause_on_applet", value, CONFIG_PATH);
+    ini_putl("config", "home_applet_music", value, CONFIG_PATH);
+}
+
+auto get_fade_on_sleep() -> bool {
+    return ini_getbool("config", "fade_on_sleep", true, CONFIG_PATH);
 }
 
 auto get_focus_log() -> bool {

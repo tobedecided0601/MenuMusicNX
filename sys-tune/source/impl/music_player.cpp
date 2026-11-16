@@ -243,6 +243,11 @@ namespace tune::impl {
 
         std::atomic_bool g_home_foreground{false};
         std::atomic_bool g_headphone_pause{false};
+        /* Set by the psc:m thread while the console prepares to sleep or shut
+           down, so the music fades out before the system suspends audio. */
+        std::atomic_bool g_power_pause{false};
+        /* True while the audio thread is outputting audible samples. */
+        std::atomic_bool g_audible{false};
         std::atomic_bool g_should_run{true};
         float g_fade_gain        = 0.f;
 
@@ -265,8 +270,18 @@ namespace tune::impl {
         }
 
         auto UpdateFadeGain() -> void {
-            const bool should_pause = !g_home_foreground.load() || g_headphone_pause.load();
+            const bool home = g_home_foreground.load();
+            const bool headphone = g_headphone_pause.load();
+            const bool power = g_power_pause.load();
+            const bool should_pause = !home || headphone || power;
             const float target = should_pause ? 0.f : 1.f;
+
+            static int last_target = -1;
+            if (last_target != static_cast<int>(target)) {
+                pm::Log("fade %s (home=%d headphone_pause=%d power_pause=%d gain=%.2f)",
+                    should_pause ? "out" : "in", home, headphone, power, static_cast<double>(g_fade_gain));
+                last_target = static_cast<int>(target);
+            }
 
             if (g_fade_gain < target) {
                 g_fade_gain = std::min(target, g_fade_gain + FADE_STEP);
@@ -277,6 +292,7 @@ namespace tune::impl {
 
         void FinishTrack() {
             const auto repeat = g_repeat.load();
+            pm::Log("track finished (repeat=%d)", static_cast<int>(repeat));
             if (repeat == RepeatMode::One) {
                 return;
             }
@@ -296,6 +312,8 @@ namespace tune::impl {
         }
 
         Result PlayTrack(const char* path) {
+            pm::Log("track start %s", path);
+
             /* Open file and allocate */
             auto source = OpenFile(path);
             R_UNLESS(source != nullptr, tune::FileOpenFailure);
@@ -315,6 +333,7 @@ namespace tune::impl {
             struct RegisteredSourceGuard {
                 Source *registered;
                 ~RegisteredSourceGuard() {
+                    g_audible.store(false);
                     std::scoped_lock lk(g_mutex);
                     if (g_source == registered) {
                         g_source = nullptr;
@@ -330,10 +349,23 @@ namespace tune::impl {
             // end-of-file apart from a genuinely broken file.
             bool produced_audio = false;
 
+            u64 iteration_start = pm::UptimeMs();
             while (g_should_run.load() && g_status.load() == PlayerStatus::Playing) {
+                /* One iteration normally takes < 100 ms (audoutWaitPlayFinish
+                   times out after 100 ms). Longer means a system call blocked,
+                   e.g. audio or SD access while the console goes to sleep. */
+                const u64 iteration_now = pm::UptimeMs();
+                if (iteration_now - iteration_start > 250) {
+                    pm::Log("audio: loop stalled %llu ms (power_pause=%d home=%d)",
+                        static_cast<unsigned long long>(iteration_now - iteration_start),
+                        g_power_pause.load(), g_home_foreground.load());
+                }
+                iteration_start = iteration_now;
+
                 UpdateFadeGain();
 
-                if (g_fade_gain <= 0.f && (!g_home_foreground.load() || g_headphone_pause.load())) {
+                g_audible.store(g_fade_gain > 0.f);
+                if (g_fade_gain <= 0.f && (!g_home_foreground.load() || g_headphone_pause.load() || g_power_pause.load())) {
                     svcSleepThread(17'000'000);
                     continue;
                 }
@@ -515,6 +547,7 @@ namespace tune::impl {
                back off once every queued track has failed in a row. */
             if (R_FAILED(rc)) {
                 ++consecutive_failures;
+                pm::Log("track error rc=0x%X failures=%u path=%s", rc, consecutive_failures, current_path);
                 const bool media_error = rc == tune::FileOpenFailure ||
                     rc == tune::VoiceInitFailure || rc == tune::DecodeFailure;
                 u32 size{};
@@ -572,8 +605,119 @@ namespace tune::impl {
         }
     }
 
+    void PscThreadFunc(void *) {
+        if (!config::get_fade_on_sleep()) {
+            pm::Log("psc: fade_on_sleep=0, not registering");
+            return;
+        }
+
+        Result rc = pscmInitialize();
+        if (R_FAILED(rc)) {
+            pm::Log("psc: pscmInitialize failed rc=0x%X", rc);
+            return;
+        }
+
+        /* Depend on audio and fs: psc puts dependents to sleep first, so both
+           stay up while we fade out (and while we log). The module id must be
+           unique system-wide; try a few unused ones (sys-clk uses 126). */
+        const u32 dependencies[] = {PscPmModuleId_Audio, PscPmModuleId_Fs};
+        constexpr u32 MODULE_IDS[] = {122, 121, 120, 119, 118};
+        PscPmModule module{};
+        bool registered = false;
+        for (const u32 id : MODULE_IDS) {
+            rc = pscmGetPmModule(&module, static_cast<PscPmModuleId>(id), dependencies,
+                sizeof(dependencies) / sizeof(dependencies[0]), true);
+            pm::Log("psc: register module id %u rc=0x%X", id, rc);
+            if (R_SUCCEEDED(rc)) {
+                registered = true;
+                break;
+            }
+        }
+        if (!registered) {
+            pscmExit();
+            return;
+        }
+
+        constexpr u64 FADE_WAIT_MAX_MS = 1000;
+
+        const auto fade_out = [](const char* reason) {
+            if (g_power_pause.exchange(true)) {
+                return; // already faded for this transition
+            }
+            const u64 start = pm::UptimeMs();
+            while (g_audible.load() && pm::UptimeMs() - start < FADE_WAIT_MAX_MS) {
+                svcSleepThread(10'000'000);
+            }
+            pm::Log("psc: faded out for %s in %llu ms (audible=%d)", reason,
+                static_cast<unsigned long long>(pm::UptimeMs() - start), g_audible.load());
+        };
+
+        /* Observed on hardware when locking: Awake(0) -> ReadyAwaken(1, screen
+           off / "minimum awake") -> ReadySleep(2) -> ReadySleepCritical(3);
+           waking: ReadyAwakenCritical(4) -> ReadyAwaken(1) -> Awake(0).
+           By ReadySleep the audio thread is already blocked, so the fade has to
+           happen at screen-off: ReadyAwaken arriving while we were Awake. */
+        PscPmState previous = PscPmState_Awake;
+
+        while (g_should_run.load()) {
+            if (R_FAILED(eventWait(&module.event, 200'000'000))) {
+                continue;
+            }
+
+            PscPmState state{};
+            u32 flags{};
+            rc = pscPmModuleGetRequest(&module, &state, &flags);
+            if (R_FAILED(rc)) {
+                pm::Log("psc: GetRequest failed rc=0x%X", rc);
+                continue;
+            }
+
+            /* Written straight to the SD card so a crash during sleep still
+               shows how far we got. */
+            pm::Log("psc: state=%u (previous %u) flags=0x%X audible=%d", static_cast<unsigned>(state),
+                static_cast<unsigned>(previous), flags, g_audible.load());
+
+            const bool screen_off = state == PscPmState_ReadyAwaken && previous == PscPmState_Awake;
+            const bool going_down = screen_off || state == PscPmState_ReadySleep ||
+                state == PscPmState_ReadySleepCritical || state == PscPmState_ReadyShutdown;
+
+            if (going_down) {
+                fade_out(screen_off ? "screen off" : state == PscPmState_ReadyShutdown ? "shutdown" : "sleep");
+            }
+
+            /* From sleep on, no SD access until waking; lines stay in memory. */
+            if (state == PscPmState_ReadySleep || state == PscPmState_ReadySleepCritical ||
+                state == PscPmState_ReadyShutdown) {
+                pm::SetLogSuspended(true);
+            }
+
+            rc = pscPmModuleAcknowledge(&module, state);
+            if (R_FAILED(rc)) {
+                pm::Log("psc: Acknowledge(%u) failed rc=0x%X", static_cast<unsigned>(state), rc);
+            }
+
+            /* Waking: fs is up again (it wakes before us). Music only resumes
+               once fully awake, so it doesn't start while the screen is off. */
+            if (state == PscPmState_ReadyAwaken && !screen_off) {
+                pm::SetLogSuspended(false);
+            }
+            if (state == PscPmState_Awake) {
+                pm::SetLogSuspended(false);
+                if (g_power_pause.exchange(false)) {
+                    pm::Log("psc: awake, music may resume");
+                }
+            }
+
+            previous = state;
+        }
+
+        pscPmModuleFinalize(&module);
+        pscPmModuleClose(&module);
+        pscmExit();
+    }
+
     bool GetStatus() {
-        return g_home_foreground.load() && !g_headphone_pause.load();
+        return g_home_foreground.load() && !g_headphone_pause.load() && !g_power_pause.load();
     }
 
     void Play() {

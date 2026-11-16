@@ -25,4 +25,15 @@ auto IsHomeMenuForeground() -> bool;
 /// Focus owner decided by the last query that resolved (diagnostics).
 auto GetFocusOwner() -> FocusOwner;
 
+/// Appends a timestamped line to /config/sys-tune/focus.log when
+/// "[config] focus_log=1" is set. Safe to call from any thread.
+void Log(const char* format, ...) __attribute__((format(printf, 1, 2)));
+
+/// While suspended (console going to sleep), log lines are kept in memory
+/// instead of being written to the SD card; resuming writes them out.
+void SetLogSuspended(bool suspended);
+
+/// Milliseconds since boot.
+auto UptimeMs() -> u64;
+
 } // namespace pm

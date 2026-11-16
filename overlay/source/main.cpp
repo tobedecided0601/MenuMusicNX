@@ -2,10 +2,15 @@
 #include "tune.h"
 #include "gui_error.hpp"
 #include "gui_main.hpp"
+#include "applet_hud.hpp"
 #include "sdmc/sdmc.hpp"
 #include "config/config.hpp"
 
 #include <tesla.hpp>
+
+namespace {
+    AppletHud g_applet_hud;
+}
 
 class SysTuneOverlay final : public tsl::Overlay {
   private:
@@ -16,6 +21,8 @@ class SysTuneOverlay final : public tsl::Overlay {
 
   public:
     void initServices() override {
+        g_applet_hud.Initialize();
+
         Result rc = tuneInitialize();
 
         // not found can happen if the service isn't started
@@ -61,7 +68,12 @@ class SysTuneOverlay final : public tsl::Overlay {
         }
     }
 
+    void hudDraw(tsl::gfx::Renderer *renderer) override {
+        g_applet_hud.Draw(renderer);
+    }
+
     void exitServices() override {
+        g_applet_hud.Exit();
         if (this->sdmc_ready)
             sdmc::Close();
         if (this->tune_ready)
