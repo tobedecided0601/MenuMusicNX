@@ -196,9 +196,11 @@ void MarkAppletClosed(FocusScan* scan, const FocusEventView& event) {
     scan->closed[scan->closed_count++] = ClosedApplet{event.program_id, event.applet_id};
 }
 
-/* Newer firmware logs the offline web applet (010000000000100F: EULA,
-   Intellectual Property Notices, Wireless E-label, ...) with applet id 51,
-   which libnx has no name for (confirmed on hardware via the process list). */
+/* Newer firmware logs the offline web applet (010000000000100F) with applet
+   id 51 when System Settings shows the EULA, Intellectual Property Notices
+   or Wireless E-label (confirmed on hardware via the process list). libnx has
+   no name for it. It is not on the silent list: music keeps playing there, as
+   the user asked. */
 constexpr u8 APPLET_ID_OFFLINE_WEB_NEW = 51;
 
 /* Applets that always silence the music: they have their own audio (Mii
@@ -212,7 +214,6 @@ auto IsSilentAppletId(u8 applet_id) -> bool {
         case AppletId_LibraryAppletOfflineWeb:
         case AppletId_LibraryAppletLoginShare:
         case AppletId_LibraryAppletWifiWebAuth:
-        case APPLET_ID_OFFLINE_WEB_NEW:
             return true;
         default:
             return false;
