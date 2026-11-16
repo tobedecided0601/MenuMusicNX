@@ -81,7 +81,9 @@ auto ClassifyFocusEventKind(u8 event_type) -> FocusEventKind {
 }
 
 auto PdmProgramIdToU64(const u32 program_id[2]) -> u64 {
-    return (static_cast<u64>(program_id[1]) << 32) | program_id[0];
+    /* pdm stores the high word first: on hardware qlaunch was logged as
+       0x0000100001000000 with the opposite order. */
+    return (static_cast<u64>(program_id[0]) << 32) | program_id[1];
 }
 
 auto TitleIdsMatch(u64 lhs, u64 rhs) -> bool {
@@ -99,16 +101,23 @@ auto TitleIdsMatch(u64 lhs, u64 rhs) -> bool {
 }
 
 auto ClassifyFocusTarget(u64 program_id, u8 applet_id, u64 app_tid) -> FocusTarget {
+    /* The program id is authoritative for qlaunch and the overlay applet: on
+       hardware the play log reported qlaunch with applet id 21, so the applet
+       id cannot be trusted to identify the HOME Menu. */
+    if (program_id == QLAUNCH_TITLE_ID) {
+        return FocusTarget::Home;
+    }
+    if (program_id == OVERLAY_APPLET_TITLE_ID) {
+        return FocusTarget::Ignore;
+    }
+
     if (applet_id != AppletId_None) {
-        /* The play event log carries the applet id, which is exact. */
-        if (applet_id == AppletId_SystemAppletMenu) {
-            return FocusTarget::Home;
-        }
-        if (applet_id == AppletId_OverlayApplet) {
-            return FocusTarget::Ignore;
-        }
+        /* applet id 1 = application was confirmed on hardware. */
         if (applet_id == AppletId_application) {
             return TitleIdsMatch(program_id, app_tid) ? FocusTarget::Application : FocusTarget::Applet;
+        }
+        if (program_id != 0 && !IsSystemAppletTitleId(program_id) && TitleIdsMatch(program_id, app_tid)) {
+            return FocusTarget::Application;
         }
         return FocusTarget::Applet;
     }
@@ -586,7 +595,7 @@ auto BootGateOpen() -> bool {
         const PdmPlayEvent* e = &g_play_events[i];
         if (first + i > g_boot_baseline_end &&
             e->play_event_type == PdmPlayEventType_Applet &&
-            e->event_data.applet.applet_id == AppletId_SystemAppletMenu &&
+            PdmProgramIdToU64(e->event_data.applet.program_id) == QLAUNCH_TITLE_ID &&
             e->event_data.applet.event_type == PdmAppletEventType_InFocus) {
             g_boot_gate_open = true;
             return true;
