@@ -362,8 +362,15 @@ namespace tune::impl {
                     }
 
                     const auto nSamples = source->Resample((u8*)buffer->buffer, buffer_size);
-                    if (nSamples <= 0) {
+                    if (nSamples < 0) {
                         error = true;
+                    } else if (nSamples == 0) {
+                        /* The decoder ran dry before Tell() reached the reported
+                           frame count (inexact MP3 length, truncated file, short
+                           read). Treat it as the end of the track instead of a
+                           failure, otherwise repeat mode never comes around. */
+                        FinishTrack();
+                        break;
                     } else {
                         ApplyFadeGain(static_cast<s16 *>(buffer->buffer), nSamples, g_fade_gain);
                         buffer->data_size = nSamples;
@@ -462,6 +469,8 @@ namespace tune::impl {
             }
         }
 
+        u32 consecutive_failures = 0;
+
         /* Run as long as we aren't stopped and no error has been encountered. */
         while (g_should_run.load()) {
             if (g_status.load() == PlayerStatus::Stopped) {
@@ -495,31 +504,33 @@ namespace tune::impl {
             /* Only play if playing and we have a track queued. */
             Result rc = PlayTrack(current_path);
 
-            /* Log error. */
+            /* Never drop tracks from the playlist on playback errors: SD reads
+               can fail transiently (sleep/wake, card busy) and removing the track
+               would slowly empty the playlist. Skip to the next track instead and
+               back off once every queued track has failed in a row. */
             if (R_FAILED(rc)) {
-                /* Invalid media should not be retried forever. Transient audio
-                   service errors retain the track and retry after a delay. */
-                if (rc == tune::FileOpenFailure || rc == tune::VoiceInitFailure ||
-                    rc == tune::DecodeFailure) {
+                ++consecutive_failures;
+                const bool media_error = rc == tune::FileOpenFailure ||
+                    rc == tune::VoiceInitFailure || rc == tune::DecodeFailure;
+                u32 size{};
+                {
                     std::scoped_lock lk(g_mutex);
-                    for (u32 i = 0; i < g_playlist.Size(); ++i) {
-                        const char *queued_path = g_playlist.GetPath(i, g_shuffle);
-                        if (queued_path != nullptr && std::strcmp(queued_path, current_path) == 0) {
-                            g_playlist.Remove(i, g_shuffle);
-                            if (g_queue_position > i)
-                                --g_queue_position;
-                            if (g_playlist.Size() == 0)
-                                g_queue_position = 0;
-                            else if (g_queue_position >= g_playlist.Size())
-                                g_queue_position = g_playlist.Size() - 1;
-                            break;
-                        }
+                    size = g_playlist.Size();
+                }
+                if (media_error && consecutive_failures < size) {
+                    Next();
+                } else {
+                    if (media_error) {
+                        Next();
                     }
                     g_status.store(PlayerStatus::FetchNext);
-                } else {
-                    g_status.store(PlayerStatus::FetchNext);
-                    svcSleepThread(500'000'000);
+                    svcSleepThread(media_error ? 2'000'000'000 : 500'000'000);
+                    if (media_error) {
+                        consecutive_failures = 0;
+                    }
                 }
+            } else {
+                consecutive_failures = 0;
             }
         }
 
