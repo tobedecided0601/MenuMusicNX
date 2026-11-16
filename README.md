@@ -100,6 +100,12 @@ Open the overlay with **L + D-Pad Down + Right Stick click** (default Tesla bind
 
 Switch **Music in HOME applets** off in the overlay (or set `home_applet_music=0`) to pause in every applet instead.
 
+### Applet HUD (debug)
+
+**Debug → Applet HUD** in the overlay toggles a small always-on panel in the top-left corner. It appears when the overlay menu is closed, passes all input through to the system, survives HOME / power presses, and lists the latest applet changes from the `pdm:qry` play log (newest first): time seen (seconds since boot, `earlier` = before the HUD started), applet id, name, event (`launch`, `focus`, `unfocus`, `background`, `exit`) and `layered` for applets drawn on top of another one. The top line shows whether the music is currently playing. Press the overlay combo to reopen the menu and switch it off. The setting is not saved.
+
+The overlay's bundled libtesla (`overlay/lib/include/tesla.hpp`) carries the small HUD-mode patch this needs (`tsl::setHudEnabled`, `Overlay::hudDraw`).
+
 ## Focus detection
 
 Playback follows the `pdm:qry` focus event log, polled every 50 ms:

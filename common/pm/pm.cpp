@@ -1,4 +1,5 @@
 #include "pm.hpp"
+#include "applet_names.hpp"
 
 #include "config/config.hpp"
 #include "sdmc/sdmc.hpp"
@@ -196,12 +197,6 @@ void MarkAppletClosed(FocusScan* scan, const FocusEventView& event) {
     scan->closed[scan->closed_count++] = ClosedApplet{event.program_id, event.applet_id};
 }
 
-/* Newer firmware logs the offline web applet (010000000000100F) with applet
-   id 51 when System Settings shows the EULA, Intellectual Property Notices
-   or Wireless E-label (confirmed on hardware via the process list). libnx has
-   no name for it. It is not on the silent list: music keeps playing there, as
-   the user asked. */
-constexpr u8 APPLET_ID_OFFLINE_WEB_NEW = 51;
 
 /* Applets that always silence the music: they have their own audio (Mii
    Maker, eShop), run homebrew (Album/hbmenu), or are web browsers. */
@@ -711,32 +706,7 @@ s32 g_power_last_end{-1};
 u64 g_power_down_until_ms{};
 
 auto AppletName(u8 applet_id) -> const char* {
-    switch (applet_id) {
-        case AppletId_None: return "none";
-        case AppletId_application: return "application";
-        case AppletId_OverlayApplet: return "overlay";
-        case AppletId_SystemAppletMenu: return "qlaunch";
-        case AppletId_SystemApplication: return "starter";
-        case AppletId_LibraryAppletAuth: return "auth";
-        case AppletId_LibraryAppletCabinet: return "cabinet";
-        case AppletId_LibraryAppletController: return "controller";
-        case AppletId_LibraryAppletDataErase: return "dataErase";
-        case AppletId_LibraryAppletError: return "error";
-        case AppletId_LibraryAppletNetConnect: return "netConnect";
-        case AppletId_LibraryAppletPlayerSelect: return "playerSelect";
-        case AppletId_LibraryAppletSwkbd: return "swkbd";
-        case AppletId_LibraryAppletMiiEdit: return "miiEdit";
-        case AppletId_LibraryAppletWeb: return "web";
-        case AppletId_LibraryAppletShop: return "shop";
-        case AppletId_LibraryAppletPhotoViewer: return "photoViewer";
-        case AppletId_LibraryAppletSet: return "set";
-        case AppletId_LibraryAppletOfflineWeb: return "offlineWeb";
-        case AppletId_LibraryAppletLoginShare: return "loginShare";
-        case AppletId_LibraryAppletWifiWebAuth: return "wifiWebAuth";
-        case AppletId_LibraryAppletMyPage: return "myPage";
-        case APPLET_ID_OFFLINE_WEB_NEW: return "offlineWeb(new)";
-        default: return "unknown";
-    }
+    return pm::AppletIdName(applet_id);
 }
 
 /* Lists every live process in the system applet title range

@@ -32,6 +32,7 @@
 #include <functional>
 #include <type_traits>
 #include <mutex>
+#include <atomic>
 #include <memory>
 #include <chrono>
 #include <list>
@@ -163,6 +164,15 @@ namespace tsl {
             None = 0,                       ///< Do nothing special at launch
             CloseOnExit        = BIT(0)     ///< Close the overlay the last Gui gets poped from the stack
         };
+
+        /* MenuMusicNX: HUD mode. While enabled and the menu is closed, the
+           overlay keeps drawing Overlay::hudDraw() and hands all input to the
+           system ("passthrough"). The launch combo opens the menu instead of
+           hiding; HOME / power no longer hide the HUD. */
+        inline std::atomic<bool> g_hudEnabled{false};
+        inline std::atomic<bool> g_hudPassthrough{false};
+        inline std::atomic<bool> g_hudRequestMenu{false};
+
 
         [[maybe_unused]] static constexpr LaunchFlags operator|(LaunchFlags lhs, LaunchFlags rhs) {
             return static_cast<LaunchFlags>(u8(lhs) | u8(rhs));
@@ -2906,6 +2916,25 @@ namespace tsl {
         virtual void onHide() {}
 
         /**
+         * @brief MenuMusicNX HUD mode: draw the always-on panel (menu closed,
+         *        input passed through to the system). Called once per frame.
+         */
+        virtual void hudDraw(gfx::Renderer *renderer) {}
+
+        /**
+         * @brief Renders one HUD frame (full opacity, transparent background).
+         */
+        void hudFrame() {
+            auto& renderer = gfx::Renderer::get();
+
+            gfx::Renderer::setOpacity(1.0F);
+            renderer.startFrame();
+            renderer.clearScreen();
+            this->hudDraw(&renderer);
+            renderer.endFrame();
+        }
+
+        /**
          * @brief Loads the default Gui
          * @note This function should return the initial Gui to load using the \ref Gui::initially<T>(Args.. args) function
          *       e.g `return initially<GuiMain>();`
@@ -3298,7 +3327,9 @@ namespace tsl {
          * @note The Overlay gets closes once there are no more Guis on the stack
          */
         void goBack() {
-            if (!this->m_closeOnExit && this->m_guiStack.size() == 1) {
+            /* MenuMusicNX: with the HUD on, leaving the first page goes back to
+               the HUD instead of exiting the overlay. */
+            if ((!this->m_closeOnExit || impl::g_hudEnabled) && this->m_guiStack.size() == 1) {
                 this->hide();
                 return;
             }
@@ -3437,7 +3468,10 @@ namespace tsl {
                         shData->touchState = { 0 };
 
                     if (((shData->keysHeld & tsl::cfg::launchCombo) == tsl::cfg::launchCombo) && shData->keysDown & tsl::cfg::launchCombo) {
-                        if (shData->overlayOpen) {
+                        if (impl::g_hudPassthrough) {
+                            impl::g_hudRequestMenu = true;
+                        }
+                        else if (shData->overlayOpen) {
                             tsl::Overlay::get()->hide();
                             shData->overlayOpen = false;
                         }
@@ -3452,7 +3486,7 @@ namespace tsl {
                 s32 idx = 0;
                 Result rc = waitObjects(&idx, objects, WaiterObject_Count, 20'000'000ul);
                 if (R_SUCCEEDED(rc)) {
-                    if (shData->overlayOpen) {
+                    if (shData->overlayOpen && !impl::g_hudPassthrough) {
                         tsl::Overlay::get()->hide();
                         shData->overlayOpen = false;
                     }
@@ -3514,6 +3548,18 @@ namespace tsl {
      * @param argv argv
      * @return int result
      */
+    /**
+     * @brief MenuMusicNX: switch the always-on HUD on or off. It shows while
+     *        the menu is closed; the launch combo opens the menu from it.
+     */
+    static inline void setHudEnabled(bool enabled) {
+        impl::g_hudEnabled = enabled;
+    }
+
+    static inline bool isHudEnabled() {
+        return impl::g_hudEnabled;
+    }
+
     template<typename TOverlay, impl::LaunchFlags launchFlags>
     static inline int loop(int argc, char** argv) {
         static_assert(std::is_base_of_v<tsl::Overlay, TOverlay>, "tsl::loop expects a type derived from tsl::Overlay");
@@ -3546,9 +3592,39 @@ namespace tsl {
         }
 
 
+        bool openMenuNow = false;
         while (shData.running) {
 
-            eventWait(&shData.comboEvent, UINT64_MAX);
+            /* MenuMusicNX HUD mode: draw the HUD with input passed through
+               until it is switched off or the combo asks for the menu. */
+            if (impl::g_hudEnabled && !openMenuNow) {
+                shData.overlayOpen = true;
+                impl::g_hudRequestMenu = false;
+                impl::g_hudPassthrough = true;
+                hlp::requestForeground(false);
+
+                while (shData.running && impl::g_hudEnabled && !impl::g_hudRequestMenu) {
+                    overlay->hudFrame();
+
+                    std::scoped_lock lock(shData.dataMutex);
+                    shData.keysDownPending = 0;
+                }
+
+                impl::g_hudPassthrough = false;
+                overlay->clearScreen();
+                shData.overlayOpen = false;
+                eventClear(&shData.comboEvent);
+
+                if (impl::g_hudRequestMenu) {
+                    impl::g_hudRequestMenu = false;
+                    openMenuNow = true;
+                }
+                continue;
+            }
+
+            if (!openMenuNow)
+                eventWait(&shData.comboEvent, UINT64_MAX);
+            openMenuNow = false;
             eventClear(&shData.comboEvent);
             shData.overlayOpen = true;
 

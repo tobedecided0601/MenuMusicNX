@@ -111,6 +111,26 @@ tsl::elm::Element *MainGui::createUI() {
     });
     list->addItem(exit_button);
 
+    list->addItem(new tsl::elm::CategoryHeader("Debug"));
+
+    /* Always-on panel with the latest applet changes, shown while this menu is
+       closed. The overlay combo reopens the menu from it. */
+    auto hud_button = new tsl::elm::ListItem("Applet HUD");
+    hud_button->setValue(tsl::isHudEnabled() ? "On" : "Off");
+    hud_button->setClickListener([hud_button, frame](u64 keys) {
+        if (keys & HidNpadButton_A) {
+            const bool value = !tsl::isHudEnabled();
+            tsl::setHudEnabled(value);
+            hud_button->setValue(value ? "On" : "Off");
+            hud_button->invalidate();
+            if (value)
+                frame->setToast("Applet HUD on", "Close this menu to see it. Combo reopens the menu.");
+            return true;
+        }
+        return false;
+    });
+    list->addItem(hud_button);
+
     frame->setContent(list);
 
     return frame;
