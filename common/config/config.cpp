@@ -105,6 +105,10 @@ void set_pause_on_applet(bool value) {
     ini_putl("config", "pause_on_applet", value, CONFIG_PATH);
 }
 
+auto get_fade_on_sleep() -> bool {
+    return ini_getbool("config", "fade_on_sleep", true, CONFIG_PATH);
+}
+
 auto get_focus_log() -> bool {
     return ini_getbool("config", "focus_log", false, CONFIG_PATH);
 }

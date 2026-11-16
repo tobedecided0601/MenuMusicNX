@@ -6,6 +6,7 @@
 #include <algorithm>
 #include <cstdarg>
 #include <cstdio>
+#include <cstring>
 
 namespace {
 
@@ -42,6 +43,9 @@ pm::FocusOwner g_focus_owner{pm::FocusOwner::Unknown};
 pm::FocusOwner g_cached_focus_owner{pm::FocusOwner::Unknown};
 bool g_pause_on_applet{true};
 bool g_focus_log{false};
+/* True from the start of a sleep/shutdown transition until wake: no SD card
+   access (log writes, config reads) in that window. */
+bool g_log_suspended{false};
 bool g_focus_log_dir_ready{false};
 s32 g_last_logged_entry_index{-1};
 
@@ -396,8 +400,10 @@ auto QueryHomeForegroundFromPdm(u64 app_tid, bool* home_foreground) -> Result {
 
     /* The ini is re-read whenever the focus event log changed, so a setting
        toggled in the overlay applies the moment it matters. */
-    g_pause_on_applet = config::get_pause_on_applet();
-    g_focus_log = config::get_focus_log();
+    if (!g_log_suspended) {
+        g_pause_on_applet = config::get_pause_on_applet();
+        g_focus_log = config::get_focus_log();
+    }
 
     s32 start_entry = end_entry_index - (EVENT_COUNT - 1);
     if (start_entry < 0) {
@@ -843,12 +849,38 @@ auto UptimeMs() -> u64 {
     return armTicksToNs(armGetSystemTick()) / 1000000ULL;
 }
 
+namespace {
+    Mutex g_log_mutex{};
+    /* Lines logged while the console sleeps; written out on wake. */
+    char g_log_pending[8 * 1024];
+    size_t g_log_pending_size{};
+    bool g_log_pending_overflow{};
+}
+
+void SetLogSuspended(bool suspended) {
+    mutexLock(&g_log_mutex);
+    g_log_suspended = suspended;
+    if (!suspended && g_focus_log) {
+        if (g_log_pending_size > 0) {
+            sdmc::AppendFile(FOCUS_LOG_PATH, g_log_pending, g_log_pending_size);
+        }
+        if (g_log_pending_overflow) {
+            constexpr char note[] = "[log] lines dropped while asleep (buffer full)\n";
+            sdmc::AppendFile(FOCUS_LOG_PATH, note, sizeof(note) - 1);
+        }
+    }
+    if (!suspended) {
+        g_log_pending_size = 0;
+        g_log_pending_overflow = false;
+    }
+    mutexUnlock(&g_log_mutex);
+}
+
 void Log(const char* format, ...) {
     if (!g_focus_log) {
         return;
     }
 
-    static Mutex mutex{};
     char line[2048];
     int used = std::snprintf(line, sizeof(line), "[%8llu] ", static_cast<unsigned long long>(UptimeMs()));
     if (used < 0) {
@@ -864,14 +896,25 @@ void Log(const char* format, ...) {
     }
     line[used++] = '\n';
 
-    mutexLock(&mutex);
+    mutexLock(&g_log_mutex);
+    if (g_log_suspended) {
+        /* No SD access while the console goes to sleep. */
+        if (g_log_pending_size + used <= sizeof(g_log_pending)) {
+            std::memcpy(g_log_pending + g_log_pending_size, line, used);
+            g_log_pending_size += used;
+        } else {
+            g_log_pending_overflow = true;
+        }
+        mutexUnlock(&g_log_mutex);
+        return;
+    }
     if (!g_focus_log_dir_ready) {
         sdmc::CreateFolder("/config");
         sdmc::CreateFolder("/config/sys-tune");
         g_focus_log_dir_ready = true;
     }
     sdmc::AppendFile(FOCUS_LOG_PATH, line, static_cast<size_t>(used));
-    mutexUnlock(&mutex);
+    mutexUnlock(&g_log_mutex);
 }
 
 } // namespace pm

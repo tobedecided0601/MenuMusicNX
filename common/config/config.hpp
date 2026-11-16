@@ -38,6 +38,9 @@ void set_default_title_volume(float value);
 auto get_pause_on_applet() -> bool;
 void set_pause_on_applet(bool value);
 
+// fade out before sleep/shutdown via psc:m (default on)
+auto get_fade_on_sleep() -> bool;
+
 // append pdm focus events and playback decisions to /config/sys-tune/focus.log
 auto get_focus_log() -> bool;
 void set_focus_log(bool value);

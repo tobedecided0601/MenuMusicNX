@@ -69,6 +69,7 @@ Keys read from that file:
 | Key | Default | Meaning |
 |---|---|---|
 | `pause_on_applet` | `1` | Pause playback while a system/library applet is in the foreground |
+| `fade_on_sleep` | `1` | Fade the music out before the console sleeps or shuts down (registers a psc:m power-state module; set `0` to disable) |
 | `focus_log` | `0` | Debug log at `sdmc:/config/sys-tune/focus.log`: every raw pdm play event, focus decisions, power-state requests, fades and track start/finish/errors, each stamped with milliseconds since boot |
 | `volume` | `1.0` | Playback volume (mirrored by the overlay slider) |
 | `shuffle` / `repeat` | `0` / `1` | Shuffle and repeat mode, mirrored by the status bar buttons |

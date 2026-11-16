@@ -594,6 +594,11 @@ namespace tune::impl {
     }
 
     void PscThreadFunc(void *) {
+        if (!config::get_fade_on_sleep()) {
+            pm::Log("psc: fade_on_sleep=0, not registering");
+            return;
+        }
+
         Result rc = pscmInitialize();
         if (R_FAILED(rc)) {
             pm::Log("psc: pscmInitialize failed rc=0x%X", rc);
@@ -635,6 +640,12 @@ namespace tune::impl {
                 pm::Log("psc: GetRequest failed rc=0x%X", rc);
                 continue;
             }
+
+            /* Stop touching the SD card before anything else once sleep or
+               shutdown starts; the lines are kept in memory until wake. */
+            if (state != PscPmState_Awake && state != PscPmState_ReadyAwaken) {
+                pm::SetLogSuspended(true);
+            }
             pm::Log("psc: state=%u flags=0x%X audible=%d", static_cast<unsigned>(state), flags, g_audible.load());
 
             switch (state) {
@@ -657,7 +668,15 @@ namespace tune::impl {
                     break;
             }
 
-            pscPmModuleAcknowledge(&module, state);
+            rc = pscPmModuleAcknowledge(&module, state);
+            if (R_FAILED(rc)) {
+                pm::Log("psc: Acknowledge(%u) failed rc=0x%X", static_cast<unsigned>(state), rc);
+            }
+
+            /* Back to SD access once waking up (fs wakes before us). */
+            if (state == PscPmState_Awake || state == PscPmState_ReadyAwaken) {
+                pm::SetLogSuspended(false);
+            }
         }
 
         pscPmModuleFinalize(&module);

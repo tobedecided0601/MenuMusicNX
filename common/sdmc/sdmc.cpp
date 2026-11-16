@@ -48,9 +48,10 @@ namespace sdmc {
         if (path == nullptr || data == nullptr || size == 0)
             return MAKERESULT(Module_Libnx, LibnxError_BadInput);
 
-        /* FsOpenMode_Append makes the kernel write at the end of the file, so
-           the offset passed to fsFileWrite is ignored. Same pattern as
-           common/minIni/minGlue.c. */
+        /* FsOpenMode_Append only lets writes grow the file; the offset passed to
+           fsFileWrite is still honoured. Write at the current end of the file,
+           otherwise every call overwrites the start (minGlue.c tracks its own
+           offset for the same reason). */
         FsFile file;
         Result rc = fsFsOpenFile(&sdmc, path, FsOpenMode_Write | FsOpenMode_Append, &file);
         if (R_FAILED(rc)) {
@@ -62,7 +63,10 @@ namespace sdmc {
                 return rc;
         }
 
-        rc = fsFileWrite(&file, 0, data, size, FsWriteOption_None);
+        s64 offset = 0;
+        rc = fsFileGetSize(&file, &offset);
+        if (R_SUCCEEDED(rc))
+            rc = fsFileWrite(&file, offset, data, size, FsWriteOption_Flush);
         fsFileClose(&file);
         return rc;
     }
