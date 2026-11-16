@@ -641,12 +641,13 @@ namespace tune::impl {
                 continue;
             }
 
-            /* Stop touching the SD card before anything else once sleep or
-               shutdown starts; the lines are kept in memory until wake. */
+            /* Write this one line straight to the SD card so a crash during
+               sleep still shows how far we got, then stop touching the card
+               until wake; later lines are kept in memory. */
+            pm::Log("psc: state=%u flags=0x%X audible=%d", static_cast<unsigned>(state), flags, g_audible.load());
             if (state != PscPmState_Awake && state != PscPmState_ReadyAwaken) {
                 pm::SetLogSuspended(true);
             }
-            pm::Log("psc: state=%u flags=0x%X audible=%d", static_cast<unsigned>(state), flags, g_audible.load());
 
             switch (state) {
                 case PscPmState_ReadySleep:

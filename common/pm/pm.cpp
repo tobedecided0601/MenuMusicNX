@@ -849,6 +849,10 @@ auto UptimeMs() -> u64 {
     return armTicksToNs(armGetSystemTick()) / 1000000ULL;
 }
 
+#ifndef MMNX_BUILD
+#define MMNX_BUILD "dev"
+#endif
+
 namespace {
     Mutex g_log_mutex{};
     /* Lines logged while the console sleeps; written out on wake. */
@@ -897,6 +901,26 @@ void Log(const char* format, ...) {
     line[used++] = '\n';
 
     mutexLock(&g_log_mutex);
+
+    /* The log is never truncated: it survives restarts and crashes (each line
+       is flushed). Mark every boot so sessions can be told apart. */
+    static bool session_marked = false;
+    if (!session_marked && !g_log_suspended) {
+        session_marked = true;
+        if (!g_focus_log_dir_ready) {
+            sdmc::CreateFolder("/config");
+            sdmc::CreateFolder("/config/sys-tune");
+            g_focus_log_dir_ready = true;
+        }
+        char marker[160];
+        const int len = std::snprintf(marker, sizeof(marker),
+            "\n==== MenuMusicNX %s started, uptime %llu ms ====\n", MMNX_BUILD,
+            static_cast<unsigned long long>(UptimeMs()));
+        if (len > 0) {
+            sdmc::AppendFile(FOCUS_LOG_PATH, marker, std::min<size_t>(len, sizeof(marker) - 1));
+        }
+    }
+
     if (g_log_suspended) {
         /* No SD access while the console goes to sleep. */
         if (g_log_pending_size + used <= sizeof(g_log_pending)) {
