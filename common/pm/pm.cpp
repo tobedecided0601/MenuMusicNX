@@ -336,8 +336,15 @@ auto ApplyFocusEvent(FocusQuery* query, FocusScan* scan, const FocusEventView& e
             return true;
 
         case FocusTarget::Application:
-            /* A game/homebrew that loses focus or terminates hands the
-               foreground back to the HOME Menu. */
+            /* Plain OutOfFocus: something else took the foreground (HOME, or a
+               keyboard / controllers applet the game opened, which pdm may log
+               just after this). Not decisive: keep scanning; if nothing newer
+               took over, the game's older InFocus keeps it silent. */
+            if (kind == FocusEventKind::OutOfFocus) {
+                return false;
+            }
+            /* In front -> silent. Sent to the background (HOME pressed) or
+               exited -> back to the HOME Menu. */
             query->home = kind != FocusEventKind::InFocus;
             query->decided = true;
             return true;
@@ -552,30 +559,32 @@ auto QueryHomeForegroundFromPdm(u64 app_tid, bool* home_foreground) -> Result {
         start_entry = 0;
     }
 
+    /* The play event log comes first: it records library applets (keyboard,
+       controllers, ...) with their applet id. The applet event log only seems
+       to carry applications there, so a game losing focus to a keyboard looked
+       like "back to HOME". It stays as a fallback. */
     s32 out{};
     s32 count{};
-    rc = pdmqryQueryAppletEvent(start_entry, hosversionAtLeast(10, 0, 0), g_applet_events, EVENT_COUNT, &out);
-    if (R_SUCCEEDED(rc) && out > 0) {
-        count = std::min(out, EVENT_COUNT);
-        FillFocusViewFromAppletEvents(start_entry, count);
-    }
-
     FocusQuery query{};
-    bool decided = ResolveFocusQuery(app_tid, count, &query);
+    bool decided = false;
 
-    if (!decided) {
-        /* Event types vary with firmware, so fall back to the play event log
-           before reporting "unknown". */
-        out = 0;
-        rc = pdmqryQueryPlayEvent(start_entry, g_play_events, EVENT_COUNT, &out);
-        if (R_FAILED(rc)) {
-            g_cached_home_valid = false;
-            return rc;
-        }
-
+    rc = pdmqryQueryPlayEvent(start_entry, g_play_events, EVENT_COUNT, &out);
+    if (R_SUCCEEDED(rc) && out > 0) {
         count = std::min(out, EVENT_COUNT);
         FillFocusViewFromPlayEvents(start_entry, count, &count);
         decided = ResolveFocusQuery(app_tid, count, &query);
+    }
+
+    if (!decided) {
+        out = 0;
+        count = 0;
+        query = FocusQuery{};
+        rc = pdmqryQueryAppletEvent(start_entry, hosversionAtLeast(10, 0, 0), g_applet_events, EVENT_COUNT, &out);
+        if (R_SUCCEEDED(rc) && out > 0) {
+            count = std::min(out, EVENT_COUNT);
+            FillFocusViewFromAppletEvents(start_entry, count);
+            decided = ResolveFocusQuery(app_tid, count, &query);
+        }
     }
 
     LogFocusEvents(count, app_tid, query, decided);
