@@ -349,7 +349,19 @@ namespace tune::impl {
             // end-of-file apart from a genuinely broken file.
             bool produced_audio = false;
 
+            u64 iteration_start = pm::UptimeMs();
             while (g_should_run.load() && g_status.load() == PlayerStatus::Playing) {
+                /* One iteration normally takes < 100 ms (audoutWaitPlayFinish
+                   times out after 100 ms). Longer means a system call blocked,
+                   e.g. audio or SD access while the console goes to sleep. */
+                const u64 iteration_now = pm::UptimeMs();
+                if (iteration_now - iteration_start > 250) {
+                    pm::Log("audio: loop stalled %llu ms (power_pause=%d home=%d)",
+                        static_cast<unsigned long long>(iteration_now - iteration_start),
+                        g_power_pause.load(), g_home_foreground.load());
+                }
+                iteration_start = iteration_now;
+
                 UpdateFadeGain();
 
                 g_audible.store(g_fade_gain > 0.f);
@@ -628,6 +640,25 @@ namespace tune::impl {
 
         constexpr u64 FADE_WAIT_MAX_MS = 1000;
 
+        const auto fade_out = [](const char* reason) {
+            if (g_power_pause.exchange(true)) {
+                return; // already faded for this transition
+            }
+            const u64 start = pm::UptimeMs();
+            while (g_audible.load() && pm::UptimeMs() - start < FADE_WAIT_MAX_MS) {
+                svcSleepThread(10'000'000);
+            }
+            pm::Log("psc: faded out for %s in %llu ms (audible=%d)", reason,
+                static_cast<unsigned long long>(pm::UptimeMs() - start), g_audible.load());
+        };
+
+        /* Observed on hardware when locking: Awake(0) -> ReadyAwaken(1, screen
+           off / "minimum awake") -> ReadySleep(2) -> ReadySleepCritical(3);
+           waking: ReadyAwakenCritical(4) -> ReadyAwaken(1) -> Awake(0).
+           By ReadySleep the audio thread is already blocked, so the fade has to
+           happen at screen-off: ReadyAwaken arriving while we were Awake. */
+        PscPmState previous = PscPmState_Awake;
+
         while (g_should_run.load()) {
             if (R_FAILED(eventWait(&module.event, 200'000'000))) {
                 continue;
@@ -641,32 +672,23 @@ namespace tune::impl {
                 continue;
             }
 
-            /* Write this one line straight to the SD card so a crash during
-               sleep still shows how far we got, then stop touching the card
-               until wake; later lines are kept in memory. */
-            pm::Log("psc: state=%u flags=0x%X audible=%d", static_cast<unsigned>(state), flags, g_audible.load());
-            if (state != PscPmState_Awake && state != PscPmState_ReadyAwaken) {
-                pm::SetLogSuspended(true);
+            /* Written straight to the SD card so a crash during sleep still
+               shows how far we got. */
+            pm::Log("psc: state=%u (previous %u) flags=0x%X audible=%d", static_cast<unsigned>(state),
+                static_cast<unsigned>(previous), flags, g_audible.load());
+
+            const bool screen_off = state == PscPmState_ReadyAwaken && previous == PscPmState_Awake;
+            const bool going_down = screen_off || state == PscPmState_ReadySleep ||
+                state == PscPmState_ReadySleepCritical || state == PscPmState_ReadyShutdown;
+
+            if (going_down) {
+                fade_out(screen_off ? "screen off" : state == PscPmState_ReadyShutdown ? "shutdown" : "sleep");
             }
 
-            switch (state) {
-                case PscPmState_ReadySleep:
-                case PscPmState_ReadyShutdown: {
-                    g_power_pause.store(true);
-                    const u64 start = pm::UptimeMs();
-                    while (g_audible.load() && pm::UptimeMs() - start < FADE_WAIT_MAX_MS) {
-                        svcSleepThread(10'000'000);
-                    }
-                    pm::Log("psc: faded out in %llu ms (audible=%d)",
-                        static_cast<unsigned long long>(pm::UptimeMs() - start), g_audible.load());
-                    break;
-                }
-                case PscPmState_ReadyAwaken:
-                case PscPmState_Awake:
-                    g_power_pause.store(false);
-                    break;
-                default:
-                    break;
+            /* From sleep on, no SD access until waking; lines stay in memory. */
+            if (state == PscPmState_ReadySleep || state == PscPmState_ReadySleepCritical ||
+                state == PscPmState_ReadyShutdown) {
+                pm::SetLogSuspended(true);
             }
 
             rc = pscPmModuleAcknowledge(&module, state);
@@ -674,10 +696,19 @@ namespace tune::impl {
                 pm::Log("psc: Acknowledge(%u) failed rc=0x%X", static_cast<unsigned>(state), rc);
             }
 
-            /* Back to SD access once waking up (fs wakes before us). */
-            if (state == PscPmState_Awake || state == PscPmState_ReadyAwaken) {
+            /* Waking: fs is up again (it wakes before us). Music only resumes
+               once fully awake, so it doesn't start while the screen is off. */
+            if (state == PscPmState_ReadyAwaken && !screen_off) {
                 pm::SetLogSuspended(false);
             }
+            if (state == PscPmState_Awake) {
+                pm::SetLogSuspended(false);
+                if (g_power_pause.exchange(false)) {
+                    pm::Log("psc: awake, music may resume");
+                }
+            }
+
+            previous = state;
         }
 
         pscPmModuleFinalize(&module);

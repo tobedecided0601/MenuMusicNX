@@ -27,13 +27,13 @@ tsl::elm::Element *MainGui::createUI() {
     info->setValue("Auto");
     list->addItem(info);
 
-    /* Applets (Settings, Album, hbmenu, ...) pause playback like games do. */
-    auto applet_pause = new tsl::elm::ListItem("Pause in applets");
-    applet_pause->setValue(config::get_pause_on_applet() ? "On" : "Off");
+    /* Keep playing in applets opened from HOME (keyboard, user page, ...). */
+    auto applet_pause = new tsl::elm::ListItem("Music in HOME applets");
+    applet_pause->setValue(config::get_home_applet_music() ? "On" : "Off");
     applet_pause->setClickListener([applet_pause](u64 keys) {
         if (keys & HidNpadButton_A) {
-            const bool value = !config::get_pause_on_applet();
-            config::set_pause_on_applet(value);
+            const bool value = !config::get_home_applet_music();
+            config::set_home_applet_music(value);
             applet_pause->setValue(value ? "On" : "Off");
             applet_pause->invalidate();
             return true;

@@ -34,9 +34,10 @@ void set_title_volume(u64 tid, float value);
 auto get_default_title_volume() -> float;
 void set_default_title_volume(float value);
 
-// pause playback while a system/library applet (Settings, Album, hbmenu, ...) is focused
-auto get_pause_on_applet() -> bool;
-void set_pause_on_applet(bool value);
+// keep playing in applets opened from the HOME Menu (keyboard, user page,
+// controllers, ...). Mii Maker, Album/hbmenu, eShop and browsers stay silent.
+auto get_home_applet_music() -> bool;
+void set_home_applet_music(bool value);
 
 // fade out before sleep/shutdown via psc:m (default on)
 auto get_fade_on_sleep() -> bool;

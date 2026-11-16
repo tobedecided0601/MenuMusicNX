@@ -36,7 +36,7 @@ MenuMusicNX is a **fork of [sys-tune](https://github.com/HookedBehemoth/sys-tune
 | Manual play/pause in overlay | Removed |
 | Title-based config (`[title]` in ini) | Ignored for playback |
 | `pmdmntGetApplicationProcessId` only | `pdm:qry` focus events + qlaunch detection |
-| Games paused music, applets kept it playing | **Applets pause too** (Settings, Album, hbmenu, ...) with a `pause_on_applet` toggle |
+| Games paused music, applets kept it playing | **Applets opened from HOME keep the music, games and their applets pause it** (Mii Maker, Album/hbmenu, eShop and browsers stay silent), with a `home_applet_music` toggle |
 | No fade transition | **Smooth fade-in/out when entering or leaving games** |
 
 ## Requirements
@@ -68,7 +68,7 @@ Keys read from that file:
 
 | Key | Default | Meaning |
 |---|---|---|
-| `pause_on_applet` | `1` | Pause playback while a system/library applet is in the foreground |
+| `home_applet_music` | `1` | Keep playing in applets opened from the HOME Menu (keyboard, user page, controllers, profile selector, error dialogs, ...). `0` pauses in every applet |
 | `fade_on_sleep` | `1` | Fade the music out before the console sleeps or shuts down (registers a psc:m power-state module; set `0` to disable) |
 | `focus_log` | `0` | Debug log at `sdmc:/config/sys-tune/focus.log`: every raw pdm play event, focus decisions, power-state requests, fades and track start/finish/errors, each stamped with milliseconds since boot |
 | `volume` | `1.0` | Playback volume (mirrored by the overlay slider) |
@@ -83,18 +83,21 @@ The sysmodule re-reads these values whenever a new focus event is logged, so a t
 |---|---|
 | HOME Menu (no game) | Music plays |
 | Game running | Music pauses |
-| System applet open (Settings, Album, eShop, hbmenu, ...) | Music pauses |
+| System Settings, Lock screen | Music plays (part of the HOME Menu) |
+| Applet opened from HOME (keyboard, user page, controllers, profile selector, error dialog, data management, ...) | Music plays |
+| Mii Maker, Album / hbmenu, eShop, web browser (EULA, ...) | Music pauses |
+| Applet opened by a game (keyboard, controllers, ...) | Music stays paused |
 | Tesla overlay open (this menu, sys-clk, ...) | Music keeps playing |
 | HOME pressed over a game | Music resumes (same position) |
 | Return to game | Music pauses |
 | Close game on HOME | Music continues |
 | Console booting (before HOME first appears) | Music stays off (up to 60 s) |
 | Game launching (user select, loading) | Music pauses |
-| Console going to sleep / shutting down | Music fades out before the console suspends |
+| Console going to sleep (screen off) / shutting down | Music fades out before the console suspends |
 
 Open the overlay with **L + D-Pad Down + Right Stick click** (default Tesla binding), then select **MenuMusicNX**.
 
-Applet pausing can be switched off with **Pause in applets** in the overlay (or `pause_on_applet=0` in the config file): music then keeps playing while Settings, the Album or applet-mode homebrew are open.
+Switch **Music in HOME applets** off in the overlay (or set `home_applet_music=0`) to pause in every applet instead.
 
 ## Focus detection
 
@@ -102,11 +105,11 @@ Playback follows the `pdm:qry` focus event log, polled every 50 ms:
 
 - qlaunch (HOME Menu) has focus → music plays (fade-in);
 - the running application (game, or homebrew in application mode) has focus → music pauses (fade-out);
-- any other system/library applet has focus (Settings, Album, eShop, hbmenu, ...) → music pauses;
+- a library applet has focus → music keeps playing if the HOME Menu opened it, pauses if a game opened it. Mii Maker, the Album (hbmenu), the eShop and the web applets always pause. The play log reports a library applet with the program id of whoever opened it, plus its own applet id;
 - the overlay applet used by Tesla/nx-ovlloader is ignored, so opening this menu never stops the music;
 - if `pdm:qry` is unavailable the old rule applies: music plays while no application is running.
 
-Tracks keep their position while paused, so playback resumes exactly where it left off. Set `focus_log=1` in the config to dump every raw focus event and the resulting decision to `sdmc:/config/sys-tune/focus.log`.
+Tracks keep their position while paused, so playback resumes exactly where it left off. Set `focus_log=1` in the config to append a debug log to `sdmc:/config/sys-tune/focus.log` (never truncated; each boot adds a marker line).
 
 ## Building
 

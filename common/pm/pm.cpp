@@ -41,7 +41,8 @@ bool g_pminfo_initialized{};
 u64 g_cached_app_tid{};
 pm::FocusOwner g_focus_owner{pm::FocusOwner::Unknown};
 pm::FocusOwner g_cached_focus_owner{pm::FocusOwner::Unknown};
-bool g_pause_on_applet{true};
+/* Music keeps playing in applets opened from the HOME Menu (see AppletKeepsMusic). */
+bool g_home_applet_music{true};
 bool g_focus_log{false};
 /* True from the start of a sleep/shutdown transition until wake: no SD card
    access (log writes, config reads) in that window. */
@@ -160,14 +161,22 @@ struct FocusQuery {
     FocusTarget target{FocusTarget::Ignore};
 };
 
+/* Applets are identified by (program id, applet id): the play log reports a
+   library applet with the program id of whoever opened it (usually qlaunch),
+   so the program id alone would also match the HOME Menu's own events. */
+struct ClosedApplet {
+    u64 program_id;
+    u8 applet_id;
+};
+
 struct FocusScan {
-    u64 closed[CLOSED_PROGRAM_MAX]{};
+    ClosedApplet closed[CLOSED_PROGRAM_MAX]{};
     u32 closed_count{};
 };
 
-auto IsClosedProgram(const FocusScan& scan, u64 program_id) -> bool {
+auto IsClosedApplet(const FocusScan& scan, const FocusEventView& event) -> bool {
     for (u32 i = 0; i < scan.closed_count; ++i) {
-        if (scan.closed[i] == program_id) {
+        if (scan.closed[i].program_id == event.program_id && scan.closed[i].applet_id == event.applet_id) {
             return true;
         }
     }
@@ -175,19 +184,71 @@ auto IsClosedProgram(const FocusScan& scan, u64 program_id) -> bool {
     return false;
 }
 
-void MarkProgramClosed(FocusScan* scan, u64 program_id) {
-    if (scan->closed_count >= CLOSED_PROGRAM_MAX || IsClosedProgram(*scan, program_id)) {
+void MarkAppletClosed(FocusScan* scan, const FocusEventView& event) {
+    if (scan->closed_count >= CLOSED_PROGRAM_MAX || IsClosedApplet(*scan, event)) {
         return;
     }
 
-    scan->closed[scan->closed_count++] = program_id;
+    scan->closed[scan->closed_count++] = ClosedApplet{event.program_id, event.applet_id};
+}
+
+/* Applets that always silence the music: they have their own audio (Mii
+   Maker, eShop), run homebrew (Album/hbmenu), or are web browsers. */
+auto IsSilentAppletId(u8 applet_id) -> bool {
+    switch (applet_id) {
+        case AppletId_LibraryAppletMiiEdit:
+        case AppletId_LibraryAppletPhotoViewer:
+        case AppletId_LibraryAppletWeb:
+        case AppletId_LibraryAppletShop:
+        case AppletId_LibraryAppletOfflineWeb:
+        case AppletId_LibraryAppletLoginShare:
+        case AppletId_LibraryAppletWifiWebAuth:
+            return true;
+        default:
+            return false;
+    }
+}
+
+auto IsSilentAppletProgram(u64 program_id) -> bool {
+    switch (program_id) {
+        case 0x0100000000001009ULL: // miiEdit
+        case 0x010000000000100DULL: // photoViewer
+        case 0x010000000000100AULL: // web
+        case 0x010000000000100BULL: // shop
+        case 0x010000000000100FULL: // offlineWeb
+        case 0x0100000000001010ULL: // loginShare
+        case 0x0100000000001011ULL: // wifiWebAuth
+            return true;
+        default:
+            return false;
+    }
+}
+
+/* Whether the music keeps playing while this applet has focus: only for
+   applets opened by the HOME Menu itself (Settings dialogs, keyboard, user
+   page, controllers, profile selector, ...), never for ones a game opened. */
+auto AppletKeepsMusic(const FocusEventView& event) -> bool {
+    if (!g_home_applet_music) {
+        return false;
+    }
+
+    if (event.applet_id != AppletId_None) {
+        if (IsSilentAppletId(event.applet_id)) {
+            return false;
+        }
+        /* program_id is the program that opened the applet. */
+        return event.program_id == QLAUNCH_TITLE_ID;
+    }
+
+    /* Applet event log: only the program id is known. */
+    return !IsSilentAppletProgram(event.program_id);
 }
 
 /* Applies a single focus event, newest first. Returns true when the event
    decides whether the HOME Menu owns the foreground. */
 auto ApplyFocusEvent(FocusQuery* query, FocusScan* scan, const FocusEventView& event, u64 app_tid) -> bool {
     const auto kind = ClassifyFocusEventKind(event.event_type);
-    if (kind == FocusEventKind::Ignore || IsClosedProgram(*scan, event.program_id)) {
+    if (kind == FocusEventKind::Ignore || IsClosedApplet(*scan, event)) {
         return false;
     }
 
@@ -218,17 +279,14 @@ auto ApplyFocusEvent(FocusQuery* query, FocusScan* scan, const FocusEventView& e
 
         case FocusTarget::Applet:
             if (kind == FocusEventKind::InFocus) {
-                if (!g_pause_on_applet) {
-                    return false;
-                }
-                query->home = false;
+                query->home = AppletKeepsMusic(event);
                 query->decided = true;
                 return true;
             }
             /* An applet that terminated is gone: keep scanning for the applet
                underneath it (or for the HOME Menu). */
             if (kind == FocusEventKind::Terminated) {
-                MarkProgramClosed(scan, event.program_id);
+                MarkAppletClosed(scan, event);
             }
             return false;
 
@@ -401,7 +459,7 @@ auto QueryHomeForegroundFromPdm(u64 app_tid, bool* home_foreground) -> Result {
     /* The ini is re-read whenever the focus event log changed, so a setting
        toggled in the overlay applies the moment it matters. */
     if (!g_log_suspended) {
-        g_pause_on_applet = config::get_pause_on_applet();
+        g_home_applet_music = config::get_home_applet_music();
         g_focus_log = config::get_focus_log();
     }
 
@@ -466,14 +524,13 @@ struct BlockingApplet {
     bool only_with_game; // true: only silence music if a game is running
 };
 
+/* Focus events already decide user select, keyboard and controllers (by who
+   opened them). The process check stays only for the Album, as a backstop
+   for homebrew in applet mode. */
 constexpr BlockingApplet BLOCKING_APPLETS[] = {
-    {0x0100000000001007ULL, false}, // playerSelect (user select)
-    {0x0100000000001008ULL, true},  // swkbd (software keyboard): silent in-game, music stays on from the main HOME menu
-    {0x0100000000001003ULL, true},  // controller: silent in-game, music stays on from the main HOME menu
     {0x010000000000100DULL, false}, // photoViewer (Album). Homebrew in applet mode runs inside this applet
 };
 constexpr size_t BLOCKING_APPLET_COUNT = sizeof(BLOCKING_APPLETS) / sizeof(BLOCKING_APPLETS[0]);
-constexpr u64 PLAYER_SELECT_TITLE_ID{0x0100000000001007ULL};
 
 /// True while an application has been launched (pdm "Launch" event) but has
 /// not exited yet. Right after you pick a game there is a window with no
@@ -628,6 +685,61 @@ constexpr u8  POWER_EVENT_WAKE = 3;
 s32 g_power_last_end{-1};
 u64 g_power_down_until_ms{};
 
+auto AppletName(u8 applet_id) -> const char* {
+    switch (applet_id) {
+        case AppletId_None: return "none";
+        case AppletId_application: return "application";
+        case AppletId_OverlayApplet: return "overlay";
+        case AppletId_SystemAppletMenu: return "qlaunch";
+        case AppletId_SystemApplication: return "starter";
+        case AppletId_LibraryAppletAuth: return "auth";
+        case AppletId_LibraryAppletCabinet: return "cabinet";
+        case AppletId_LibraryAppletController: return "controller";
+        case AppletId_LibraryAppletDataErase: return "dataErase";
+        case AppletId_LibraryAppletError: return "error";
+        case AppletId_LibraryAppletNetConnect: return "netConnect";
+        case AppletId_LibraryAppletPlayerSelect: return "playerSelect";
+        case AppletId_LibraryAppletSwkbd: return "swkbd";
+        case AppletId_LibraryAppletMiiEdit: return "miiEdit";
+        case AppletId_LibraryAppletWeb: return "web";
+        case AppletId_LibraryAppletShop: return "shop";
+        case AppletId_LibraryAppletPhotoViewer: return "photoViewer";
+        case AppletId_LibraryAppletSet: return "set";
+        case AppletId_LibraryAppletOfflineWeb: return "offlineWeb";
+        case AppletId_LibraryAppletLoginShare: return "loginShare";
+        case AppletId_LibraryAppletWifiWebAuth: return "wifiWebAuth";
+        case AppletId_LibraryAppletMyPage: return "myPage";
+        default: return "unknown";
+    }
+}
+
+/* Lists every live process in the system applet title range
+   (0x0100000000001000-0x01000000000010FF). */
+void LogRunningSystemApplets(u8 applet_id) {
+    if (!g_pmdmnt_initialized) {
+        return;
+    }
+
+    char list[512];
+    int used = 0;
+    list[0] = '\0';
+    for (u64 tid = 0x0100000000001000ULL; tid <= 0x01000000000010FFULL; ++tid) {
+        u64 pid{};
+        if (R_SUCCEEDED(pmdmntGetProcessId(&pid, tid))) {
+            const int room = static_cast<int>(sizeof(list)) - used;
+            if (room <= 1) {
+                break;
+            }
+            const int written = std::snprintf(list + used, room, " %016llX(pid %llu)",
+                static_cast<unsigned long long>(tid), static_cast<unsigned long long>(pid));
+            if (written > 0) {
+                used += std::min(written, room - 1);
+            }
+        }
+    }
+    pm::Log("unknown applet_id=%u, live system applets:%s", static_cast<unsigned>(applet_id), list);
+}
+
 /* Dumps every new pdm play event (applet, account, power, operation mode,
    ...) so unknown signals such as unlocking the lock screen can be found. */
 void LogRawPlayEvent(s32 index, const PdmPlayEvent& e) {
@@ -641,14 +753,23 @@ void LogRawPlayEvent(s32 index, const PdmPlayEvent& e) {
     }
 
     if (e.play_event_type == PdmPlayEventType_Applet) {
-        pm::Log("play idx=%d applet pid=%016llX applet_id=%u event=%u mode=%u steady=%llu raw=%s",
+        const u8 applet_id = e.event_data.applet.applet_id;
+        pm::Log("play idx=%d applet pid=%016llX applet_id=%u(%s) event=%u mode=%u steady=%llu raw=%s",
             index,
             static_cast<unsigned long long>(PdmProgramIdToU64(e.event_data.applet.program_id)),
-            static_cast<unsigned>(e.event_data.applet.applet_id),
+            static_cast<unsigned>(applet_id), AppletName(applet_id),
             static_cast<unsigned>(e.event_data.applet.event_type),
             static_cast<unsigned>(e.event_data.applet.unk_x8.applet.mode),
             static_cast<unsigned long long>(e.timestamp_steady),
             hex);
+
+        /* Applet ids newer than libnx's list: name the program by listing the
+           system applet processes that are alive right now. */
+        const u8 event_type = e.event_data.applet.event_type;
+        if (applet_id > AppletId_LibraryAppletMyPage &&
+            (event_type == PdmAppletEventType_Launch || event_type == PdmAppletEventType_InFocus)) {
+            LogRunningSystemApplets(applet_id);
+        }
     } else {
         pm::Log("play idx=%d type=%u value=%u steady=%llu raw=%s",
             index,
@@ -721,7 +842,7 @@ auto Initialize() -> Result {
     g_focus_owner = pm::FocusOwner::Unknown;
     g_last_logged_entry_index = -1;
 
-    g_pause_on_applet = config::get_pause_on_applet();
+    g_home_applet_music = config::get_home_applet_music();
     g_focus_log = config::get_focus_log();
 
     return 0;
@@ -797,9 +918,6 @@ auto IsHomeMenuForeground() -> bool {
     if (home && g_pmdmnt_initialized) {
         for (size_t i = 0; i < BLOCKING_APPLET_COUNT && !blocked; ++i) {
             const auto& applet = BLOCKING_APPLETS[i];
-            if (applet.title_id != PLAYER_SELECT_TITLE_ID && !g_pause_on_applet) {
-                continue;
-            }
             if (applet.only_with_game && !game_running) {
                 continue;
             }
@@ -830,10 +948,10 @@ auto IsHomeMenuForeground() -> bool {
         boot_ready, powering_down, result, g_focus_owner};
     if (!have_last || !(now == last)) {
         Log("state play=%d | pdm_decided=%d pdm_home=%d owner=%u launching=%d blocked=%d(%016llX) "
-            "boot_ready=%d power_down=%d | app_pid=%lld app_tid=%016llX pause_on_applet=%d",
+            "boot_ready=%d power_down=%d | app_pid=%lld app_tid=%016llX home_applet_music=%d",
             result, pdm_decided, pdm_home, static_cast<unsigned>(g_focus_owner), launching,
             blocked, static_cast<unsigned long long>(blocked_by), boot_ready, powering_down,
-            static_cast<long long>(pid), static_cast<unsigned long long>(app_tid), g_pause_on_applet);
+            static_cast<long long>(pid), static_cast<unsigned long long>(app_tid), g_home_applet_music);
         last = now;
         have_last = true;
     }
