@@ -90,11 +90,11 @@ void AppletHud::Draw(tsl::gfx::Renderer *renderer) {
 
     renderer->drawRect(x, y, w, h, renderer->a({0x0, 0x0, 0x0, 0xC}));
 
-    const tsl::gfx::Color white{0xF, 0xF, 0xF, 0xF};
-    const tsl::gfx::Color grey{0xA, 0xA, 0xA, 0xF};
-    const tsl::gfx::Color green{0x4, 0xF, 0x6, 0xF};
-    const tsl::gfx::Color orange{0xF, 0xA, 0x3, 0xF};
-    const tsl::gfx::Color cyan{0x5, 0xD, 0xF, 0xF};
+    const tsl::Color white{0xF, 0xF, 0xF, 0xF};
+    const tsl::Color grey{0xA, 0xA, 0xA, 0xF};
+    const tsl::Color green{0x4, 0xF, 0x6, 0xF};
+    const tsl::Color orange{0xF, 0xA, 0x3, 0xF};
+    const tsl::Color cyan{0x5, 0xD, 0xF, 0xF};
 
     s32 ty = y + 6 + font;
     renderer->drawString("Applet HUD", false, x + 8, ty, font, renderer->a(white));
@@ -136,7 +136,7 @@ void AppletHud::Draw(tsl::gfx::Renderer *renderer) {
 
         const char *name = pm::AppletIdName(e.applet_id);
         const bool focus = e.event_type == PdmAppletEventType_InFocus;
-        const tsl::gfx::Color text = n == 0 ? white : grey;
+        const tsl::Color text = n == 0 ? white : grey;
 
         renderer->drawString(time, false, x + 8, ty, font, renderer->a(text));
         renderer->drawString(id, false, x + 88, ty, font, renderer->a(cyan));
