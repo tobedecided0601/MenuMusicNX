@@ -435,6 +435,218 @@ auto QueryHomeForegroundFromPdm(u64 app_tid, bool* home_foreground) -> Result {
     return 0;
 }
 
+/* ---- From Fimochi/MenuMusicNX#3 (CLAPD): extra gates that keep the music
+   silent at boot, while the console sleeps/shuts down, while a game is being
+   launched, and while certain applets have a live process. ---- */
+
+/// Programs for system applets that are NOT the HOME Menu itself.
+/// While any of these has a live process, music must stay paused, even if no
+/// game is running (e.g. user select at game launch) or the game is still the
+/// "application" (e.g. software keyboard opened from inside a game).
+/// Add more title IDs here if you want other applets to silence the music.
+struct BlockingApplet {
+    u64 title_id;
+    bool only_with_game; // true: only silence music if a game is running
+};
+
+constexpr BlockingApplet BLOCKING_APPLETS[] = {
+    {0x0100000000001007ULL, false}, // playerSelect (user select)
+    {0x0100000000001008ULL, true},  // swkbd (software keyboard): silent in-game, music stays on from the main HOME menu
+    {0x0100000000001003ULL, true},  // controller: silent in-game, music stays on from the main HOME menu
+    {0x010000000000100DULL, false}, // photoViewer (Album). Homebrew in applet mode runs inside this applet
+};
+constexpr size_t BLOCKING_APPLET_COUNT = sizeof(BLOCKING_APPLETS) / sizeof(BLOCKING_APPLETS[0]);
+constexpr u64 PLAYER_SELECT_TITLE_ID{0x0100000000001007ULL};
+
+/// True while an application has been launched (pdm "Launch" event) but has
+/// not exited yet. Right after you pick a game there is a window with no
+/// application process (user select screen, loading) where the old logic
+/// wrongly reported HOME.
+/// Event types seen on hardware: 0 = Launch, 1 = Exit (applet_id 1 = application).
+auto ApplicationLaunchPending() -> bool {
+    if (!g_pdmqry_initialized) {
+        return false;
+    }
+
+    s32 total{}, start{}, end{};
+    if (R_FAILED(pdmqryGetAvailablePlayEventRange(&total, &start, &end))) {
+        return false;
+    }
+
+    /* Polled every 50 ms: only rescan when the event log grew. */
+    static s32 cached_end{-1};
+    static bool cached_pending{};
+    static u64 pending_since_ms{};
+    /* A launch that was cancelled (e.g. backing out of user select) may never
+       log an Exit event: stop treating it as pending after a while. */
+    constexpr u64 LAUNCH_PENDING_MAX_MS = 30'000;
+    const u64 now_ms = armTicksToNs(armGetSystemTick()) / 1000000ULL;
+    if (end == cached_end) {
+        return cached_pending && now_ms - pending_since_ms < LAUNCH_PENDING_MAX_MS;
+    }
+    cached_end = end;
+    cached_pending = false;
+
+    s32 first = end - (EVENT_COUNT - 1);
+    if (first < 0) {
+        first = 0;
+    }
+
+    s32 out{};
+    if (R_FAILED(pdmqryQueryPlayEvent(first, g_play_events, EVENT_COUNT, &out))) {
+        return false;
+    }
+
+    for (s32 i = out - 1; i >= 0; --i) {
+        const PdmPlayEvent* e = &g_play_events[i];
+        if (e->play_event_type != PdmPlayEventType_Applet ||
+            e->event_data.applet.applet_id != AppletId_application) {
+            continue;
+        }
+
+        const u8 t = e->event_data.applet.event_type;
+        if (t == 0) {
+            cached_pending = true; // Launch is the newest application lifecycle event
+            pending_since_ms = now_ms;
+            return true;
+        }
+        if (t == 1) {
+            return false; // Exit
+        }
+    }
+
+    return false;
+}
+
+// ---- Boot gate: keep music off until HOME has really appeared this boot ----
+constexpr u64 BOOT_RESTART_UPTIME_MS = 90'000; // first poll later than this = manual restart, not a boot
+constexpr u64 BOOT_FALLBACK_MS       = 60'000; // never hold the music longer than this after the first poll
+
+bool g_boot_gate_open{};
+bool g_boot_gate_init{};
+s32 g_boot_baseline_end{-1};
+u64 g_boot_first_poll_ms{};
+
+auto NowMs() -> u64 {
+    return armTicksToNs(armGetSystemTick()) / 1000000ULL;
+}
+
+auto BootGateOpen() -> bool {
+    if (g_boot_gate_open) {
+        return true;
+    }
+
+    const u64 now = NowMs();
+
+    if (!g_boot_gate_init) {
+        g_boot_gate_init = true;
+        g_boot_first_poll_ms = now;
+
+        s32 total{}, start{}, end{};
+        if (g_pdmqry_initialized && R_SUCCEEDED(pdmqryGetAvailablePlayEventRange(&total, &start, &end))) {
+            g_boot_baseline_end = end;
+        } else {
+            g_boot_baseline_end = -1;
+        }
+
+        if (g_boot_baseline_end < 0 || now > BOOT_RESTART_UPTIME_MS) {
+            g_boot_gate_open = true;
+            return true;
+        }
+    }
+
+    if (now - g_boot_first_poll_ms > BOOT_FALLBACK_MS) {
+        g_boot_gate_open = true;
+        return true;
+    }
+
+    // Open once a NEW qlaunch InFocus event shows up (history from previous
+    // sessions is ignored: it is older than the baseline index).
+    s32 total{}, start{}, end{};
+    if (!g_pdmqry_initialized || R_FAILED(pdmqryGetAvailablePlayEventRange(&total, &start, &end))) {
+        return false;
+    }
+    if (end <= g_boot_baseline_end) {
+        return false;
+    }
+
+    s32 first = end - (EVENT_COUNT - 1);
+    if (first < 0) {
+        first = 0;
+    }
+
+    s32 out{};
+    if (R_FAILED(pdmqryQueryPlayEvent(first, g_play_events, EVENT_COUNT, &out))) {
+        return false;
+    }
+
+    for (s32 i = 0; i < out; ++i) {
+        const PdmPlayEvent* e = &g_play_events[i];
+        if (first + i > g_boot_baseline_end &&
+            e->play_event_type == PdmPlayEventType_Applet &&
+            e->event_data.applet.applet_id == AppletId_SystemAppletMenu &&
+            e->event_data.applet.event_type == PdmAppletEventType_InFocus) {
+            g_boot_gate_open = true;
+            return true;
+        }
+    }
+
+    return false;
+}
+// ---- end boot gate ----
+
+// ---- Power-down hold: silence music when the console sleeps or shuts down ----
+// pdm logs power-state events (play event type 2). On hardware the first raw
+// byte of the event was 2 on sleep and 3 on wake; the shutdown value was not
+// observed, so any sub-type other than "on" (0) and "wake" (3) counts as the
+// console going down. The hold clears on wake/on, or after a timeout in case an
+// unrelated power event slips through, so the music can never stay off for good.
+constexpr u64 POWER_DOWN_HOLD_MS = 30'000;
+constexpr u8  PLAY_EVENT_POWER_STATE = 2;
+constexpr u8  POWER_EVENT_ON = 0;
+constexpr u8  POWER_EVENT_WAKE = 3;
+
+s32 g_power_last_end{-1};
+u64 g_power_down_until_ms{};
+
+auto PowerDownActive() -> bool {
+    const u64 now = NowMs();
+
+    s32 total{}, start{}, end{};
+    if (g_pdmqry_initialized && R_SUCCEEDED(pdmqryGetAvailablePlayEventRange(&total, &start, &end))) {
+        if (g_power_last_end < 0) {
+            g_power_last_end = end; // ignore history from before we started
+        } else if (end > g_power_last_end) {
+            s32 first = end - (EVENT_COUNT - 1);
+            if (first < 0) {
+                first = 0;
+            }
+
+            s32 out{};
+            if (R_SUCCEEDED(pdmqryQueryPlayEvent(first, g_play_events, EVENT_COUNT, &out))) {
+                for (s32 i = 0; i < out; ++i) {
+                    const PdmPlayEvent* e = &g_play_events[i];
+                    if (first + i <= g_power_last_end ||
+                        static_cast<u8>(e->play_event_type) != PLAY_EVENT_POWER_STATE) {
+                        continue;
+                    }
+
+                    const u8 sub_type = reinterpret_cast<const u8*>(e)[0];
+                    if (sub_type == POWER_EVENT_WAKE || sub_type == POWER_EVENT_ON) {
+                        g_power_down_until_ms = 0;
+                    } else {
+                        g_power_down_until_ms = now + POWER_DOWN_HOLD_MS;
+                    }
+                }
+            }
+            g_power_last_end = end;
+        }
+    }
+
+    return now < g_power_down_until_ms;
+}
+// ---- end power-down hold ----
+
 } // namespace
 
 namespace pm {
@@ -505,11 +717,42 @@ auto IsHomeMenuForeground() -> bool {
        decided the answer; "no application runs" is the fallback for every
        other case (no pdm:qry, undecidable or stale log). */
     bool home = no_application;
-    if (QueryHomeForegroundFromPdm(app_tid, &home) == 0) {
-        return home;
+    if (QueryHomeForegroundFromPdm(app_tid, &home) != 0) {
+        home = no_application;
     }
 
-    return no_application;
+    /* No application process yet, but a game was just picked (user select,
+       loading screen): that is not the HOME Menu. */
+    if (home && no_application && ApplicationLaunchPending()) {
+        home = false;
+    }
+
+    /* Applets with a live process that must silence the music. User select
+       always blocks (it belongs to launching a game); the others follow the
+       pause_on_applet setting. */
+    const bool game_running = pid != 0 && pid != UINT64_MAX && app_tid != QLAUNCH_TITLE_ID;
+    bool blocked = false;
+    if (home && g_pmdmnt_initialized) {
+        for (size_t i = 0; i < BLOCKING_APPLET_COUNT && !blocked; ++i) {
+            const auto& applet = BLOCKING_APPLETS[i];
+            if (applet.title_id != PLAYER_SELECT_TITLE_ID && !g_pause_on_applet) {
+                continue;
+            }
+            if (applet.only_with_game && !game_running) {
+                continue;
+            }
+            u64 bpid{};
+            if (R_SUCCEEDED(pmdmntGetProcessId(&bpid, applet.title_id))) {
+                blocked = true;
+            }
+        }
+    }
+
+    /* Evaluate both every poll so their event-log baselines stay current. */
+    const bool boot_ready = BootGateOpen();
+    const bool powering_down = PowerDownActive();
+
+    return home && !blocked && boot_ready && !powering_down;
 }
 
 auto GetFocusOwner() -> FocusOwner {

@@ -326,6 +326,10 @@ namespace tune::impl {
             // for the first buffer, use very small buffer sizes to reduce latency between songs.
             int first = 1;
 
+            // Set once this track has produced any audio. Used to tell a normal
+            // end-of-file apart from a genuinely broken file.
+            bool produced_audio = false;
+
             while (g_should_run.load() && g_status.load() == PlayerStatus::Playing) {
                 UpdateFadeGain();
 
@@ -362,7 +366,7 @@ namespace tune::impl {
                     }
 
                     const auto nSamples = source->Resample((u8*)buffer->buffer, buffer_size);
-                    if (nSamples < 0) {
+                    if (nSamples < 0 || (nSamples == 0 && !produced_audio)) {
                         error = true;
                     } else if (nSamples == 0) {
                         /* The decoder ran dry before Tell() reached the reported
@@ -372,6 +376,7 @@ namespace tune::impl {
                         FinishTrack();
                         break;
                     } else {
+                        produced_audio = true;
                         ApplyFadeGain(static_cast<s16 *>(buffer->buffer), nSamples, g_fade_gain);
                         buffer->data_size = nSamples;
                         R_TRY(audoutAppendAudioOutBuffer(buffer));

@@ -87,6 +87,9 @@ The sysmodule re-reads these values whenever the focus event log changes, so a t
 | HOME pressed over a game | Music resumes (same position) |
 | Return to game | Music pauses |
 | Close game on HOME | Music continues |
+| Console booting (before HOME first appears) | Music stays off (up to 60 s) |
+| Game launching (user select, loading) | Music pauses |
+| Console going to sleep / shutting down | Music pauses |
 
 Open the overlay with **L + D-Pad Down + Right Stick click** (default Tesla binding), then select **MenuMusicNX**.
 
