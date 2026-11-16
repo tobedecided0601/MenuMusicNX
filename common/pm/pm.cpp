@@ -4,6 +4,7 @@
 #include "sdmc/sdmc.hpp"
 
 #include <algorithm>
+#include <cstdarg>
 #include <cstdio>
 
 namespace {
@@ -81,8 +82,8 @@ auto ClassifyFocusEventKind(u8 event_type) -> FocusEventKind {
 }
 
 auto PdmProgramIdToU64(const u32 program_id[2]) -> u64 {
-    /* pdm stores the high word first: on hardware qlaunch was logged as
-       0x0000100001000000 with the opposite order. */
+    /* pdm stores the two u32 halves swapped (see libnx pdm.h); on hardware
+       qlaunch was logged as 0x0000100001000000 with the opposite order. */
     return (static_cast<u64>(program_id[0]) << 32) | program_id[1];
 }
 
@@ -101,23 +102,18 @@ auto TitleIdsMatch(u64 lhs, u64 rhs) -> bool {
 }
 
 auto ClassifyFocusTarget(u64 program_id, u8 applet_id, u64 app_tid) -> FocusTarget {
-    /* The program id is authoritative for qlaunch and the overlay applet: on
-       hardware the play log reported qlaunch with applet id 21, so the applet
-       id cannot be trusted to identify the HOME Menu. */
-    if (program_id == QLAUNCH_TITLE_ID) {
-        return FocusTarget::Home;
-    }
-    if (program_id == OVERLAY_APPLET_TITLE_ID) {
-        return FocusTarget::Ignore;
-    }
-
     if (applet_id != AppletId_None) {
-        /* applet id 1 = application was confirmed on hardware. */
+        /* The play log's applet id names the applet itself. Its program id can
+           be the program that opened it: on hardware an Album (photoViewer, 21)
+           event was logged with qlaunch's program id. So the applet id wins. */
+        if (applet_id == AppletId_SystemAppletMenu) {
+            return FocusTarget::Home;
+        }
+        if (applet_id == AppletId_OverlayApplet) {
+            return FocusTarget::Ignore;
+        }
         if (applet_id == AppletId_application) {
             return TitleIdsMatch(program_id, app_tid) ? FocusTarget::Application : FocusTarget::Applet;
-        }
-        if (program_id != 0 && !IsSystemAppletTitleId(program_id) && TitleIdsMatch(program_id, app_tid)) {
-            return FocusTarget::Application;
         }
         return FocusTarget::Applet;
     }
@@ -369,7 +365,11 @@ void LogFocusEvents(s32 count, u64 app_tid, const FocusQuery& query, bool decide
         static_cast<unsigned>(query.event_type));
 
     if (used > 0) {
-        sdmc::AppendFile(FOCUS_LOG_PATH, buffer, static_cast<size_t>(used));
+        /* Drop the trailing newline; pm::Log adds its own. */
+        if (buffer[used - 1] == '\n') {
+            buffer[used - 1] = '\0';
+        }
+        pm::Log("focus scan\n%s", buffer);
     }
 }
 
@@ -595,7 +595,9 @@ auto BootGateOpen() -> bool {
         const PdmPlayEvent* e = &g_play_events[i];
         if (first + i > g_boot_baseline_end &&
             e->play_event_type == PdmPlayEventType_Applet &&
-            PdmProgramIdToU64(e->event_data.applet.program_id) == QLAUNCH_TITLE_ID &&
+            (e->event_data.applet.applet_id == AppletId_SystemAppletMenu ||
+             (e->event_data.applet.applet_id == AppletId_None &&
+              PdmProgramIdToU64(e->event_data.applet.program_id) == QLAUNCH_TITLE_ID)) &&
             e->event_data.applet.event_type == PdmAppletEventType_InFocus) {
             g_boot_gate_open = true;
             return true;
@@ -620,6 +622,37 @@ constexpr u8  POWER_EVENT_WAKE = 3;
 s32 g_power_last_end{-1};
 u64 g_power_down_until_ms{};
 
+/* Dumps every new pdm play event (applet, account, power, operation mode,
+   ...) so unknown signals such as unlocking the lock screen can be found. */
+void LogRawPlayEvent(s32 index, const PdmPlayEvent& e) {
+    if (!g_focus_log) {
+        return;
+    }
+
+    char hex[sizeof(e.event_data.data) * 2 + 1]{};
+    for (size_t i = 0; i < sizeof(e.event_data.data); ++i) {
+        std::snprintf(hex + i * 2, 3, "%02X", e.event_data.data[i]);
+    }
+
+    if (e.play_event_type == PdmPlayEventType_Applet) {
+        pm::Log("play idx=%d applet pid=%016llX applet_id=%u event=%u mode=%u steady=%llu raw=%s",
+            index,
+            static_cast<unsigned long long>(PdmProgramIdToU64(e.event_data.applet.program_id)),
+            static_cast<unsigned>(e.event_data.applet.applet_id),
+            static_cast<unsigned>(e.event_data.applet.event_type),
+            static_cast<unsigned>(e.event_data.applet.unk_x8.applet.mode),
+            static_cast<unsigned long long>(e.timestamp_steady),
+            hex);
+    } else {
+        pm::Log("play idx=%d type=%u value=%u steady=%llu raw=%s",
+            index,
+            static_cast<unsigned>(e.play_event_type),
+            static_cast<unsigned>(e.event_data.data[0]),
+            static_cast<unsigned long long>(e.timestamp_steady),
+            hex);
+    }
+}
+
 auto PowerDownActive() -> bool {
     const u64 now = NowMs();
 
@@ -637,16 +670,24 @@ auto PowerDownActive() -> bool {
             if (R_SUCCEEDED(pdmqryQueryPlayEvent(first, g_play_events, EVENT_COUNT, &out))) {
                 for (s32 i = 0; i < out; ++i) {
                     const PdmPlayEvent* e = &g_play_events[i];
-                    if (first + i <= g_power_last_end ||
-                        static_cast<u8>(e->play_event_type) != PLAY_EVENT_POWER_STATE) {
+                    if (first + i <= g_power_last_end) {
+                        continue;
+                    }
+
+                    LogRawPlayEvent(first + i, *e);
+
+                    if (static_cast<u8>(e->play_event_type) != PLAY_EVENT_POWER_STATE) {
                         continue;
                     }
 
                     const u8 sub_type = reinterpret_cast<const u8*>(e)[0];
                     if (sub_type == POWER_EVENT_WAKE || sub_type == POWER_EVENT_ON) {
                         g_power_down_until_ms = 0;
+                        pm::Log("power event value=%u -> hold cleared", sub_type);
                     } else {
                         g_power_down_until_ms = now + POWER_DOWN_HOLD_MS;
+                        pm::Log("power event value=%u -> hold %llu ms", sub_type,
+                            static_cast<unsigned long long>(POWER_DOWN_HOLD_MS));
                     }
                 }
             }
@@ -728,13 +769,16 @@ auto IsHomeMenuForeground() -> bool {
        decided the answer; "no application runs" is the fallback for every
        other case (no pdm:qry, undecidable or stale log). */
     bool home = no_application;
-    if (QueryHomeForegroundFromPdm(app_tid, &home) != 0) {
+    const bool pdm_decided = QueryHomeForegroundFromPdm(app_tid, &home) == 0;
+    if (!pdm_decided) {
         home = no_application;
     }
+    const bool pdm_home = home;
 
     /* No application process yet, but a game was just picked (user select,
        loading screen): that is not the HOME Menu. */
-    if (home && no_application && ApplicationLaunchPending()) {
+    const bool launching = home && no_application && ApplicationLaunchPending();
+    if (launching) {
         home = false;
     }
 
@@ -743,6 +787,7 @@ auto IsHomeMenuForeground() -> bool {
        pause_on_applet setting. */
     const bool game_running = pid != 0 && pid != UINT64_MAX && app_tid != QLAUNCH_TITLE_ID;
     bool blocked = false;
+    u64 blocked_by = 0;
     if (home && g_pmdmnt_initialized) {
         for (size_t i = 0; i < BLOCKING_APPLET_COUNT && !blocked; ++i) {
             const auto& applet = BLOCKING_APPLETS[i];
@@ -755,6 +800,7 @@ auto IsHomeMenuForeground() -> bool {
             u64 bpid{};
             if (R_SUCCEEDED(pmdmntGetProcessId(&bpid, applet.title_id))) {
                 blocked = true;
+                blocked_by = applet.title_id;
             }
         }
     }
@@ -763,11 +809,69 @@ auto IsHomeMenuForeground() -> bool {
     const bool boot_ready = BootGateOpen();
     const bool powering_down = PowerDownActive();
 
-    return home && !blocked && boot_ready && !powering_down;
+    const bool result = home && !blocked && boot_ready && !powering_down;
+
+    /* Log every change of any input, so focus.log explains each decision. */
+    struct Snapshot {
+        u64 pid, app_tid, blocked_by;
+        bool pdm_decided, pdm_home, launching, blocked, boot_ready, powering_down, result;
+        pm::FocusOwner owner;
+        bool operator==(const Snapshot&) const = default;
+    };
+    static Snapshot last{};
+    static bool have_last = false;
+    const Snapshot now{pid, app_tid, blocked_by, pdm_decided, pdm_home, launching, blocked,
+        boot_ready, powering_down, result, g_focus_owner};
+    if (!have_last || !(now == last)) {
+        Log("state play=%d | pdm_decided=%d pdm_home=%d owner=%u launching=%d blocked=%d(%016llX) "
+            "boot_ready=%d power_down=%d | app_pid=%lld app_tid=%016llX pause_on_applet=%d",
+            result, pdm_decided, pdm_home, static_cast<unsigned>(g_focus_owner), launching,
+            blocked, static_cast<unsigned long long>(blocked_by), boot_ready, powering_down,
+            static_cast<long long>(pid), static_cast<unsigned long long>(app_tid), g_pause_on_applet);
+        last = now;
+        have_last = true;
+    }
+
+    return result;
 }
 
 auto GetFocusOwner() -> FocusOwner {
     return g_focus_owner;
+}
+
+auto UptimeMs() -> u64 {
+    return armTicksToNs(armGetSystemTick()) / 1000000ULL;
+}
+
+void Log(const char* format, ...) {
+    if (!g_focus_log) {
+        return;
+    }
+
+    static Mutex mutex{};
+    char line[2048];
+    int used = std::snprintf(line, sizeof(line), "[%8llu] ", static_cast<unsigned long long>(UptimeMs()));
+    if (used < 0) {
+        return;
+    }
+
+    va_list args;
+    va_start(args, format);
+    const int written = std::vsnprintf(line + used, sizeof(line) - used, format, args);
+    va_end(args);
+    if (written > 0) {
+        used = std::min<int>(used + written, sizeof(line) - 2);
+    }
+    line[used++] = '\n';
+
+    mutexLock(&mutex);
+    if (!g_focus_log_dir_ready) {
+        sdmc::CreateFolder("/config");
+        sdmc::CreateFolder("/config/sys-tune");
+        g_focus_log_dir_ready = true;
+    }
+    sdmc::AppendFile(FOCUS_LOG_PATH, line, static_cast<size_t>(used));
+    mutexUnlock(&mutex);
 }
 
 } // namespace pm

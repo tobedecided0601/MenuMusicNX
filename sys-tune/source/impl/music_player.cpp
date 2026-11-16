@@ -243,6 +243,11 @@ namespace tune::impl {
 
         std::atomic_bool g_home_foreground{false};
         std::atomic_bool g_headphone_pause{false};
+        /* Set by the psc:m thread while the console prepares to sleep or shut
+           down, so the music fades out before the system suspends audio. */
+        std::atomic_bool g_power_pause{false};
+        /* True while the audio thread is outputting audible samples. */
+        std::atomic_bool g_audible{false};
         std::atomic_bool g_should_run{true};
         float g_fade_gain        = 0.f;
 
@@ -265,8 +270,18 @@ namespace tune::impl {
         }
 
         auto UpdateFadeGain() -> void {
-            const bool should_pause = !g_home_foreground.load() || g_headphone_pause.load();
+            const bool home = g_home_foreground.load();
+            const bool headphone = g_headphone_pause.load();
+            const bool power = g_power_pause.load();
+            const bool should_pause = !home || headphone || power;
             const float target = should_pause ? 0.f : 1.f;
+
+            static int last_target = -1;
+            if (last_target != static_cast<int>(target)) {
+                pm::Log("fade %s (home=%d headphone_pause=%d power_pause=%d gain=%.2f)",
+                    should_pause ? "out" : "in", home, headphone, power, static_cast<double>(g_fade_gain));
+                last_target = static_cast<int>(target);
+            }
 
             if (g_fade_gain < target) {
                 g_fade_gain = std::min(target, g_fade_gain + FADE_STEP);
@@ -277,6 +292,7 @@ namespace tune::impl {
 
         void FinishTrack() {
             const auto repeat = g_repeat.load();
+            pm::Log("track finished (repeat=%d)", static_cast<int>(repeat));
             if (repeat == RepeatMode::One) {
                 return;
             }
@@ -296,6 +312,8 @@ namespace tune::impl {
         }
 
         Result PlayTrack(const char* path) {
+            pm::Log("track start %s", path);
+
             /* Open file and allocate */
             auto source = OpenFile(path);
             R_UNLESS(source != nullptr, tune::FileOpenFailure);
@@ -315,6 +333,7 @@ namespace tune::impl {
             struct RegisteredSourceGuard {
                 Source *registered;
                 ~RegisteredSourceGuard() {
+                    g_audible.store(false);
                     std::scoped_lock lk(g_mutex);
                     if (g_source == registered) {
                         g_source = nullptr;
@@ -333,7 +352,8 @@ namespace tune::impl {
             while (g_should_run.load() && g_status.load() == PlayerStatus::Playing) {
                 UpdateFadeGain();
 
-                if (g_fade_gain <= 0.f && (!g_home_foreground.load() || g_headphone_pause.load())) {
+                g_audible.store(g_fade_gain > 0.f);
+                if (g_fade_gain <= 0.f && (!g_home_foreground.load() || g_headphone_pause.load() || g_power_pause.load())) {
                     svcSleepThread(17'000'000);
                     continue;
                 }
@@ -515,6 +535,7 @@ namespace tune::impl {
                back off once every queued track has failed in a row. */
             if (R_FAILED(rc)) {
                 ++consecutive_failures;
+                pm::Log("track error rc=0x%X failures=%u path=%s", rc, consecutive_failures, current_path);
                 const bool media_error = rc == tune::FileOpenFailure ||
                     rc == tune::VoiceInitFailure || rc == tune::DecodeFailure;
                 u32 size{};
@@ -572,8 +593,80 @@ namespace tune::impl {
         }
     }
 
+    void PscThreadFunc(void *) {
+        Result rc = pscmInitialize();
+        if (R_FAILED(rc)) {
+            pm::Log("psc: pscmInitialize failed rc=0x%X", rc);
+            return;
+        }
+
+        /* Depend on audio and fs: psc puts dependents to sleep first, so both
+           stay up while we fade out (and while we log). The module id must be
+           unique system-wide; try a few unused ones (sys-clk uses 126). */
+        const u32 dependencies[] = {PscPmModuleId_Audio, PscPmModuleId_Fs};
+        constexpr u32 MODULE_IDS[] = {122, 121, 120, 119, 118};
+        PscPmModule module{};
+        bool registered = false;
+        for (const u32 id : MODULE_IDS) {
+            rc = pscmGetPmModule(&module, static_cast<PscPmModuleId>(id), dependencies,
+                sizeof(dependencies) / sizeof(dependencies[0]), true);
+            pm::Log("psc: register module id %u rc=0x%X", id, rc);
+            if (R_SUCCEEDED(rc)) {
+                registered = true;
+                break;
+            }
+        }
+        if (!registered) {
+            pscmExit();
+            return;
+        }
+
+        constexpr u64 FADE_WAIT_MAX_MS = 1000;
+
+        while (g_should_run.load()) {
+            if (R_FAILED(eventWait(&module.event, 200'000'000))) {
+                continue;
+            }
+
+            PscPmState state{};
+            u32 flags{};
+            rc = pscPmModuleGetRequest(&module, &state, &flags);
+            if (R_FAILED(rc)) {
+                pm::Log("psc: GetRequest failed rc=0x%X", rc);
+                continue;
+            }
+            pm::Log("psc: state=%u flags=0x%X audible=%d", static_cast<unsigned>(state), flags, g_audible.load());
+
+            switch (state) {
+                case PscPmState_ReadySleep:
+                case PscPmState_ReadyShutdown: {
+                    g_power_pause.store(true);
+                    const u64 start = pm::UptimeMs();
+                    while (g_audible.load() && pm::UptimeMs() - start < FADE_WAIT_MAX_MS) {
+                        svcSleepThread(10'000'000);
+                    }
+                    pm::Log("psc: faded out in %llu ms (audible=%d)",
+                        static_cast<unsigned long long>(pm::UptimeMs() - start), g_audible.load());
+                    break;
+                }
+                case PscPmState_ReadyAwaken:
+                case PscPmState_Awake:
+                    g_power_pause.store(false);
+                    break;
+                default:
+                    break;
+            }
+
+            pscPmModuleAcknowledge(&module, state);
+        }
+
+        pscPmModuleFinalize(&module);
+        pscPmModuleClose(&module);
+        pscmExit();
+    }
+
     bool GetStatus() {
-        return g_home_foreground.load() && !g_headphone_pause.load();
+        return g_home_foreground.load() && !g_headphone_pause.load() && !g_power_pause.load();
     }
 
     void Play() {

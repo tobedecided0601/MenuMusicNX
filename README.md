@@ -69,7 +69,7 @@ Keys read from that file:
 | Key | Default | Meaning |
 |---|---|---|
 | `pause_on_applet` | `1` | Pause playback while a system/library applet is in the foreground |
-| `focus_log` | `0` | Append pdm focus events and playback decisions to `sdmc:/config/sys-tune/focus.log` |
+| `focus_log` | `0` | Debug log at `sdmc:/config/sys-tune/focus.log`: every raw pdm play event, focus decisions, power-state requests, fades and track start/finish/errors, each stamped with milliseconds since boot |
 | `volume` | `1.0` | Playback volume (mirrored by the overlay slider) |
 | `shuffle` / `repeat` | `0` / `1` | Shuffle and repeat mode, mirrored by the status bar buttons |
 | `load_path` | *(empty)* | Startup file or folder, set with **ZR** in the browser or playlist |
@@ -89,7 +89,7 @@ The sysmodule re-reads these values whenever a new focus event is logged, so a t
 | Close game on HOME | Music continues |
 | Console booting (before HOME first appears) | Music stays off (up to 60 s) |
 | Game launching (user select, loading) | Music pauses |
-| Console going to sleep / shutting down | Music pauses |
+| Console going to sleep / shutting down | Music fades out before the console suspends |
 
 Open the overlay with **L + D-Pad Down + Right Stick click** (default Tesla binding), then select **MenuMusicNX**.
 

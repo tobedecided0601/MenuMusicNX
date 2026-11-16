@@ -50,6 +50,7 @@ namespace {
     alignas(0x1000) u8 gpioThreadBuffer[0x1000];
     alignas(0x1000) u8 pmdmntThreadBuffer[0x4000];
     alignas(0x1000) u8 tuneThreadBuffer[0x6000];
+    alignas(0x1000) u8 pscThreadBuffer[0x3000];
 
 }
 
@@ -113,6 +114,17 @@ int main(int, char *[]) {
         gpio_thread_created = true;
         gpio_thread_started = R_SUCCEEDED(threadStart(&gpioThread));
     }
+    /* Power-state notifications (fade out before sleep/shutdown) are optional
+       as well: playback works without them. */
+    ::Thread pscThread{};
+    bool psc_thread_started = false;
+    if (R_SUCCEEDED(threadCreate(&pscThread, tune::impl::PscThreadFunc, nullptr,
+            pscThreadBuffer, sizeof(pscThreadBuffer), 0x20, -2))) {
+        psc_thread_started = R_SUCCEEDED(threadStart(&pscThread));
+        if (!psc_thread_started)
+            threadClose(&pscThread);
+    }
+
     tune::LoopProcess();
     tune::ExitServer();
 
@@ -122,6 +134,11 @@ int main(int, char *[]) {
     svcCancelSynchronization(pmdmtThread.handle);
     svcCancelSynchronization(tuneThread.handle);
 
+    if (psc_thread_started) {
+        svcCancelSynchronization(pscThread.handle);
+        threadWaitForExit(&pscThread);
+        threadClose(&pscThread);
+    }
     if (gpio_thread_started)
         threadWaitForExit(&gpioThread);
     threadWaitForExit(&pmdmtThread);
