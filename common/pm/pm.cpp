@@ -145,6 +145,10 @@ struct FocusEventView {
     u64 program_id;
     u8 applet_id;
     u8 event_type;
+    /* LibAppletMode for library applets; 1 = PartialForeground, i.e. drawn
+       on top of the applet that opened it (e.g. the keyboard the offline web
+       applet opens by itself). 0 when unknown. */
+    u8 mode;
 };
 
 FocusEventView g_focus_view[EVENT_COUNT]{};
@@ -192,6 +196,11 @@ void MarkAppletClosed(FocusScan* scan, const FocusEventView& event) {
     scan->closed[scan->closed_count++] = ClosedApplet{event.program_id, event.applet_id};
 }
 
+/* Newer firmware logs the offline web applet (010000000000100F: EULA,
+   Intellectual Property Notices, Wireless E-label, ...) with applet id 51,
+   which libnx has no name for (confirmed on hardware via the process list). */
+constexpr u8 APPLET_ID_OFFLINE_WEB_NEW = 51;
+
 /* Applets that always silence the music: they have their own audio (Mii
    Maker, eShop), run homebrew (Album/hbmenu), or are web browsers. */
 auto IsSilentAppletId(u8 applet_id) -> bool {
@@ -203,6 +212,7 @@ auto IsSilentAppletId(u8 applet_id) -> bool {
         case AppletId_LibraryAppletOfflineWeb:
         case AppletId_LibraryAppletLoginShare:
         case AppletId_LibraryAppletWifiWebAuth:
+        case APPLET_ID_OFFLINE_WEB_NEW:
             return true;
         default:
             return false;
@@ -286,6 +296,10 @@ auto ApplyFocusEvent(FocusQuery* query, FocusScan* scan, const FocusEventView& e
 
         case FocusTarget::Applet:
             if (kind == FocusEventKind::InFocus) {
+                /* Drawn on top of another applet: that one decides. */
+                if (event.mode == 1) {
+                    return false;
+                }
                 query->home = AppletKeepsMusic(event);
                 query->decided = true;
                 return true;
@@ -323,6 +337,7 @@ void FillFocusViewFromAppletEvents(s32 start_entry, s32 count) {
             g_applet_events[i].program_id,
             AppletId_None,
             g_applet_events[i].event_type,
+            0,
         };
     }
 }
@@ -340,6 +355,8 @@ void FillFocusViewFromPlayEvents(s32 start_entry, s32 count, s32* out_count) {
             PdmProgramIdToU64(g_play_events[i].event_data.applet.program_id),
             g_play_events[i].event_data.applet.applet_id,
             g_play_events[i].event_data.applet.event_type,
+            g_play_events[i].event_data.applet.applet_id == AppletId_application
+                ? static_cast<u8>(0) : g_play_events[i].event_data.applet.unk_x8.applet.mode,
         };
         ++entries;
     }
@@ -716,6 +733,7 @@ auto AppletName(u8 applet_id) -> const char* {
         case AppletId_LibraryAppletLoginShare: return "loginShare";
         case AppletId_LibraryAppletWifiWebAuth: return "wifiWebAuth";
         case AppletId_LibraryAppletMyPage: return "myPage";
+        case APPLET_ID_OFFLINE_WEB_NEW: return "offlineWeb(new)";
         default: return "unknown";
     }
 }

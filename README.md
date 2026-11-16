@@ -85,7 +85,7 @@ The sysmodule re-reads these values whenever a new focus event is logged, so a t
 | Game running | Music pauses |
 | System Settings, Lock screen | Music plays (part of the HOME Menu) |
 | Applet opened from HOME (keyboard, user page, controllers, profile selector, error dialog, data management, ...) | Music plays |
-| Mii Maker, Album / hbmenu, eShop, web browser (EULA, ...) | Music pauses |
+| Mii Maker, Album / hbmenu, eShop, web browser and offline web pages (EULA, Intellectual Property Notices, Wireless E-label, ...) | Music pauses |
 | Applet opened by a game (keyboard, controllers, ...) | Music stays paused |
 | Tesla overlay open (this menu, sys-clk, ...) | Music keeps playing |
 | HOME pressed over a game | Music resumes (same position) |
