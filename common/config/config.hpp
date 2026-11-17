@@ -39,6 +39,11 @@ void set_default_title_volume(float value);
 auto get_home_applet_music() -> bool;
 void set_home_applet_music(bool value);
 
+// sound played when an application (game / homebrew) is launched; WAV file,
+// empty path disables it. Not bundled: users provide their own file.
+auto get_launch_sound(char* out, int max_len) -> int;
+auto get_launch_sound_volume() -> float;
+
 // fade out before sleep/shutdown via psc:m (default on)
 auto get_fade_on_sleep() -> bool;
 

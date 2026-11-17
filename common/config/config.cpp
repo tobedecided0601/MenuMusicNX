@@ -105,6 +105,14 @@ void set_home_applet_music(bool value) {
     ini_putl("config", "home_applet_music", value, CONFIG_PATH);
 }
 
+auto get_launch_sound(char* out, int max_len) -> int {
+    return ini_gets("config", "launch_sound", "/config/sys-tune/sounds/app_launch.wav", out, max_len, CONFIG_PATH);
+}
+
+auto get_launch_sound_volume() -> float {
+    return ini_getf("config", "launch_sound_volume", 1.f, CONFIG_PATH);
+}
+
 auto get_fade_on_sleep() -> bool {
     return ini_getbool("config", "fade_on_sleep", true, CONFIG_PATH);
 }
