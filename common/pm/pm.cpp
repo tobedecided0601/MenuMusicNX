@@ -5,7 +5,6 @@
 #include "sdmc/sdmc.hpp"
 
 #include <algorithm>
-#include <atomic>
 #include <cstdarg>
 #include <cstdio>
 #include <cstring>
@@ -46,9 +45,6 @@ pm::FocusOwner g_cached_focus_owner{pm::FocusOwner::Unknown};
 /* Music keeps playing in applets opened from the HOME Menu (see AppletMayKeepMusic and the opener scan). */
 bool g_home_applet_music{true};
 bool g_focus_log{false};
-/* Set by the pmdmnt thread when a new application launch is logged; read and
-   cleared by the audio thread (launch sound). */
-std::atomic<bool> g_app_launch_pending{false};
 /* True from the start of a sleep/shutdown transition until wake: no SD card
    access (log writes, config reads) in that window. */
 bool g_log_suspended{false};
@@ -876,14 +872,6 @@ auto PowerDownActive() -> bool {
 
                     LogRawPlayEvent(first + i, *e);
 
-                    if (e->play_event_type == PdmPlayEventType_Applet &&
-                        e->event_data.applet.applet_id == AppletId_application &&
-                        e->event_data.applet.event_type == PdmAppletEventType_Launch) {
-                        g_app_launch_pending = true;
-                        pm::Log("application launch: %016llX",
-                            static_cast<unsigned long long>(PdmProgramIdToU64(e->event_data.applet.program_id)));
-                    }
-
                     if (static_cast<u8>(e->play_event_type) != PLAY_EVENT_POWER_STATE) {
                         continue;
                     }
@@ -1042,10 +1030,6 @@ auto IsHomeMenuForeground() -> bool {
 
 auto GetFocusOwner() -> FocusOwner {
     return g_focus_owner;
-}
-
-auto ConsumeApplicationLaunch() -> bool {
-    return g_app_launch_pending.exchange(false);
 }
 
 auto UptimeMs() -> u64 {

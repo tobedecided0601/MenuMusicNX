@@ -69,8 +69,6 @@ Keys read from that file:
 | Key | Default | Meaning |
 |---|---|---|
 | `home_applet_music` | `1` | Keep playing in applets opened from the HOME Menu (keyboard, user page, controllers, profile selector, error dialogs, ...). `0` pauses in every applet |
-| `launch_sound` | `/config/sys-tune/sounds/app_launch.wav` | WAV file played when a game or homebrew application is launched (3DS-style). Not included: put your own file there or point this at one. Empty disables it |
-| `launch_sound_volume` | `1.0` | Launch sound volume, `0.0`–`1.0` (on top of the music volume) |
 | `fade_on_sleep` | `1` | Fade the music out before the console sleeps or shuts down (registers a psc:m power-state module; set `0` to disable) |
 | `focus_log` | `0` | Debug log at `sdmc:/config/sys-tune/focus.log`: every raw pdm play event, focus decisions, power-state requests, fades and track start/finish/errors, each stamped with milliseconds since boot |
 | `volume` | `1.0` | Playback volume (mirrored by the overlay slider) |
@@ -95,16 +93,12 @@ The sysmodule re-reads these values whenever a new focus event is logged, so a t
 | Return to game | Music pauses |
 | Close game on HOME | Music continues |
 | Console booting (before HOME first appears) | Music stays off (up to 60 s) |
-| Game launching (user select, loading) | Music pauses (your launch sound plays, if set up) |
+| Game launching (user select, loading) | Music pauses |
 | Console going to sleep (screen off) / shutting down | Music fades out before the console suspends |
 
 Open the overlay with **L + D-Pad Down + Right Stick click** (default Tesla binding), then select **MenuMusicNX**.
 
 Switch **Music in HOME applets** off in the overlay (or set `home_applet_music=0`) to pause in every applet instead.
-
-### Launch sound
-
-Like the 3DS, MenuMusicNX can play a short sound when you launch a game or homebrew application. No sound is bundled: copy a **WAV** file (any sample rate, mono or stereo, 16-bit PCM recommended) to `sdmc:/config/sys-tune/sounds/app_launch.wav`, or set `launch_sound` to another path. It plays on top of the music's fade-out, at `launch_sound_volume`. MP3/FLAC are not supported for the launch sound (it uses its own small WAV reader so it can play while a track is open).
 
 ### Applet HUD (debug)
 

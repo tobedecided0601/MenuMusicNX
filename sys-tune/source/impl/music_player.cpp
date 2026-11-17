@@ -6,7 +6,6 @@
 #include "pm/pm.hpp"
 #include "config/config.hpp"
 #include "source.hpp"
-#include "sfx.hpp"
 #include "resamplers/SDL_audioEX.h"
 
 #include <atomic>
@@ -312,21 +311,6 @@ namespace tune::impl {
             }
         }
 
-        /* Application launched: play the user's launch sound (if any) on top
-           of the music while it fades out. */
-        void StartLaunchSound() {
-            char path[PATH_SIZE_MAX]{};
-            if (config::get_launch_sound(path, sizeof(path)) <= 0 || path[0] == '\0') {
-                pm::Log("sfx: launch_sound is empty, no launch sound");
-                return;
-            }
-            if (!sdmc::FileExists(path)) {
-                pm::Log("sfx: no launch sound at %s", path);
-                return;
-            }
-            sfx::Start(path, config::get_launch_sound_volume());
-        }
-
         Result PlayTrack(const char* path) {
             pm::Log("track start %s", path);
 
@@ -380,15 +364,8 @@ namespace tune::impl {
 
                 UpdateFadeGain();
 
-                if (pm::ConsumeApplicationLaunch()) {
-                    StartLaunchSound();
-                }
-                const bool sfx_active = sfx::Active();
-
                 g_audible.store(g_fade_gain > 0.f);
-                const bool music_paused = g_fade_gain <= 0.f &&
-                    (!g_home_foreground.load() || g_headphone_pause.load() || g_power_pause.load());
-                if (music_paused && !sfx_active) {
+                if (g_fade_gain <= 0.f && (!g_home_foreground.load() || g_headphone_pause.load() || g_power_pause.load())) {
                     svcSleepThread(17'000'000);
                     continue;
                 }
@@ -420,20 +397,6 @@ namespace tune::impl {
                         buffer_size = std::min(512 * sizeof(s16), buffer_size);
                     }
 
-                    constexpr size_t FRAME_BYTES = AUDIO_CHANNEL_COUNT * sizeof(s16);
-
-                    if (music_paused) {
-                        /* Music is silent: output only the launch sound and
-                           don't decode, so the track keeps its position. */
-                        std::memset(buffer->buffer, 0, buffer_size);
-                        const size_t mixed = sfx::Mix(static_cast<s16 *>(buffer->buffer), buffer_size / FRAME_BYTES, AUDIO_FREQ);
-                        if (mixed > 0) {
-                            buffer->data_size = mixed * FRAME_BYTES;
-                            R_TRY(audoutAppendAudioOutBuffer(buffer));
-                        }
-                        continue;
-                    }
-
                     const auto nSamples = source->Resample((u8*)buffer->buffer, buffer_size);
                     if (nSamples < 0 || (nSamples == 0 && !produced_audio)) {
                         error = true;
@@ -447,9 +410,6 @@ namespace tune::impl {
                     } else {
                         produced_audio = true;
                         ApplyFadeGain(static_cast<s16 *>(buffer->buffer), nSamples, g_fade_gain);
-                        if (sfx_active) {
-                            sfx::Mix(static_cast<s16 *>(buffer->buffer), static_cast<size_t>(nSamples) / FRAME_BYTES, AUDIO_FREQ);
-                        }
                         buffer->data_size = nSamples;
                         R_TRY(audoutAppendAudioOutBuffer(buffer));
                     }

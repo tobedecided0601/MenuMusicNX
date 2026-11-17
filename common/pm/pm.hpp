@@ -33,11 +33,6 @@ void Log(const char* format, ...) __attribute__((format(printf, 1, 2)));
 /// instead of being written to the SD card; resuming writes them out.
 void SetLogSuspended(bool suspended);
 
-/// True once per application (game / homebrew) launch seen in the pdm play
-/// log since the last call. Launches from before the sysmodule started are
-/// ignored.
-auto ConsumeApplicationLaunch() -> bool;
-
 /// Milliseconds since boot.
 auto UptimeMs() -> u64;
 
